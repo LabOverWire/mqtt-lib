@@ -21,6 +21,8 @@ struct Pending {
     inflight_on_disk: HashSet<InflightKey>,
     #[cfg(not(target_arch = "wasm32"))]
     cleared_inflight: Vec<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    emptied_inflight: HashSet<String>,
 }
 
 impl Pending {
@@ -39,6 +41,7 @@ impl Pending {
 #[derive(Default)]
 pub(crate) struct WriteBatch {
     pub(crate) cleared_inflight: Vec<String>,
+    pub(crate) emptied_inflight: HashSet<String>,
     pub(crate) queue: HashMap<QueueKey, Option<Arc<QueuedMessage>>>,
     pub(crate) inflight: HashMap<InflightKey, Option<Box<InflightMessage>>>,
 }
@@ -122,10 +125,18 @@ impl WriteBehind {
         pending.cleared_inflight.push(client_id.to_string());
     }
 
+    pub(crate) fn prune_inflight_dir(&self, client_id: &str) {
+        self.pending
+            .lock()
+            .emptied_inflight
+            .insert(client_id.to_string());
+    }
+
     pub(crate) fn take_batch(&self) -> WriteBatch {
         let mut pending = self.pending.lock();
         let batch = WriteBatch {
             cleared_inflight: std::mem::take(&mut pending.cleared_inflight),
+            emptied_inflight: std::mem::take(&mut pending.emptied_inflight),
             queue: std::mem::take(&mut pending.queue),
             inflight: std::mem::take(&mut pending.inflight),
         };

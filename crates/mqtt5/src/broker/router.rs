@@ -173,6 +173,12 @@ pub struct Subscription {
     pub change_only: bool,
     pub flow_id: Option<u64>,
     pub instance: u64,
+    retained_cutoff: Option<u64>,
+}
+
+struct StampedRetained {
+    stamp: u64,
+    message: RetainedMessage,
 }
 
 type SubscriptionIdentity<'a> = (&'a str, Option<&'a str>, Option<u64>);
@@ -184,6 +190,13 @@ impl Subscription {
         (&self.client_id, self.share_group.as_deref(), self.flow_id)
     }
 
+    fn routes_live(&self, retained_stamp: Option<u64>) -> bool {
+        match (retained_stamp, self.retained_cutoff) {
+            (Some(stamp), Some(cutoff)) => stamp >= cutoff,
+            _ => true,
+        }
+    }
+
     fn routed_instance(&self) -> Option<u64> {
         (self.instance != 0).then_some(self.instance)
     }
@@ -193,7 +206,8 @@ impl Subscription {
 pub struct MessageRouter {
     exact_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
     wildcard_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
-    retained_messages: Arc<RwLock<HashMap<String, RetainedMessage>>>,
+    retained_messages: Arc<RwLock<HashMap<String, StampedRetained>>>,
+    retain_clock: std::sync::atomic::AtomicU64,
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
     storage: Option<Arc<DynamicStorage>>,
     share_group_counters: Arc<RwLock<ShareGroupCounters>>,
@@ -381,6 +395,7 @@ impl MessageRouter {
             exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             retained_messages: Arc::new(RwLock::new(HashMap::new())),
+            retain_clock: std::sync::atomic::AtomicU64::new(0),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: None,
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
@@ -420,6 +435,7 @@ impl MessageRouter {
             exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             retained_messages: Arc::new(RwLock::new(HashMap::new())),
+            retain_clock: std::sync::atomic::AtomicU64::new(0),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: Some(storage),
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
@@ -536,8 +552,9 @@ impl MessageRouter {
             let stored_messages = storage.get_retained_messages("#").await?;
             let mut retained = self.retained_messages.write().await;
 
-            for (topic, msg) in stored_messages {
-                retained.insert(topic, msg);
+            for (topic, message) in stored_messages {
+                let stamp = self.retain_clock.fetch_add(1, Ordering::SeqCst);
+                retained.insert(topic, StampedRetained { stamp, message });
             }
 
             debug!("Loaded {} retained messages from storage", retained.len());
@@ -1191,6 +1208,28 @@ impl MessageRouter {
         generation: Option<u64>,
         request: SubscriptionRequest,
     ) -> Result<Subscribed> {
+        let (outcome, _) = self
+            .register_subscription(generation, request, false)
+            .await?;
+        Ok(outcome)
+    }
+
+    /// # Errors
+    /// Returns an error when `retain_handling` is invalid.
+    pub async fn subscribe_for_retained(
+        &self,
+        generation: Option<u64>,
+        request: SubscriptionRequest,
+    ) -> Result<(Subscribed, Option<u64>)> {
+        self.register_subscription(generation, request, true).await
+    }
+
+    async fn register_subscription(
+        &self,
+        generation: Option<u64>,
+        request: SubscriptionRequest,
+        delivers_retained: bool,
+    ) -> Result<(Subscribed, Option<u64>)> {
         let SubscriptionRequest {
             client_id,
             topic_filter,
@@ -1213,7 +1252,7 @@ impl MessageRouter {
         let (actual_filter, share_group) = parse_shared_subscription(&topic_filter);
         let share_group = share_group.map(str::to_string);
 
-        let subscription = Subscription {
+        let mut subscription = Subscription {
             client_id: client_id.clone(),
             qos,
             subscription_id,
@@ -1225,6 +1264,7 @@ impl MessageRouter {
             change_only,
             flow_id,
             instance,
+            retained_cutoff: None,
         };
 
         let subscriptions = if Self::has_wildcards(actual_filter) {
@@ -1234,12 +1274,22 @@ impl MessageRouter {
         };
         let mut subs_map = subscriptions.write().await;
         if !self.generation_is_current(generation, &client_id).await {
-            return Ok(Subscribed::Fenced);
+            return Ok((Subscribed::Fenced, None));
         }
         let subs = subs_map.entry(actual_filter.to_string()).or_default();
         let existing_pos = subs
             .iter()
             .position(|s| s.identity() == subscription.identity());
+        let owes_retained = delivers_retained
+            && subscription.share_group.is_none()
+            && match retain_handling {
+                0 => true,
+                1 => existing_pos.is_none(),
+                _ => false,
+            };
+        subscription.retained_cutoff =
+            owes_retained.then(|| self.retain_clock.fetch_add(1, Ordering::SeqCst));
+        let retained_cutoff = subscription.retained_cutoff;
         let outcome = if let Some(pos) = existing_pos {
             subs[pos] = subscription;
             debug!(
@@ -1263,7 +1313,7 @@ impl MessageRouter {
                 .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
 
-        Ok(outcome)
+        Ok((outcome, retained_cutoff))
     }
 
     async fn generation_is_current(&self, generation: Option<u64>, client_id: &str) -> bool {
@@ -1552,10 +1602,12 @@ impl MessageRouter {
             );
         }
 
-        if publish.retain {
+        let retained_stamp = if publish.retain {
             self.handle_retain_storage(publish, retained_limits_apply)
-                .await;
-        }
+                .await
+        } else {
+            None
+        };
 
         let plans = {
             let exact = self.exact_subscriptions.read().await;
@@ -1571,7 +1623,10 @@ impl MessageRouter {
             let mut plans = self
                 .plan_share_groups(&share_groups, publish, &clients, publishing_client_id)
                 .await;
-            for sub in &regular_subs {
+            for sub in regular_subs
+                .iter()
+                .filter(|sub| sub.routes_live(retained_stamp))
+            {
                 if let Some(plan) = self
                     .plan_delivery(sub, publish, &clients, publishing_client_id)
                     .await
@@ -1601,19 +1656,24 @@ impl MessageRouter {
         }
     }
 
-    async fn handle_retain_storage(&self, publish: &PublishPacket, retained_limits_apply: bool) {
-        let (should_remove, retained_msg) = if publish.payload.is_empty() {
-            self.retained_messages
-                .write()
-                .await
-                .remove(&publish.topic_name);
+    async fn handle_retain_storage(
+        &self,
+        publish: &PublishPacket,
+        retained_limits_apply: bool,
+    ) -> Option<u64> {
+        let (should_remove, retained_msg, stamp) = if publish.payload.is_empty() {
+            let stamp = {
+                let mut retained = self.retained_messages.write().await;
+                retained.remove(&publish.topic_name);
+                self.retain_clock.fetch_add(1, Ordering::SeqCst)
+            };
             debug!("Deleted retained message for topic: {}", publish.topic_name);
-            (true, None)
+            (true, None, stamp)
         } else {
             let max_size = self.max_retained_message_size();
             let max_count = self.max_retained_messages();
             let retained_msg = RetainedMessage::new(publish.clone());
-            {
+            let stamp = {
                 let mut retained = self.retained_messages.write().await;
                 let too_large = max_size > 0 && publish.payload.len() > max_size;
                 let store_full = max_count > 0
@@ -1627,12 +1687,20 @@ impl MessageRouter {
                         max_retained_messages = max_count,
                         "Retained message limit reached: delivering without retaining"
                     );
-                    return;
+                    return None;
                 }
-                retained.insert(publish.topic_name.clone(), retained_msg.clone());
-            }
+                let stamp = self.retain_clock.fetch_add(1, Ordering::SeqCst);
+                retained.insert(
+                    publish.topic_name.clone(),
+                    StampedRetained {
+                        stamp,
+                        message: retained_msg.clone(),
+                    },
+                );
+                stamp
+            };
             debug!("Stored retained message for topic: {}", publish.topic_name);
-            (false, Some(retained_msg))
+            (false, Some(retained_msg), stamp)
         };
 
         if let Some(ref storage) = self.storage {
@@ -1659,6 +1727,7 @@ impl MessageRouter {
             };
             handler.on_retained_set(event).await;
         }
+        Some(stamp)
     }
 
     fn collect_matching_subscriptions<'a>(
@@ -1987,11 +2056,23 @@ impl MessageRouter {
     }
 
     pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<PublishPacket> {
+        self.retained_messages_before(topic_filter, u64::MAX).await
+    }
+
+    pub async fn retained_messages_before(
+        &self,
+        topic_filter: &str,
+        cutoff: u64,
+    ) -> Vec<PublishPacket> {
         let retained = self.retained_messages.read().await;
         retained
             .iter()
-            .filter(|(topic, msg)| topic_matches_filter(topic, topic_filter) && !msg.is_expired())
-            .map(|(_, msg)| msg.to_publish_packet())
+            .filter(|(topic, stored)| {
+                stored.stamp < cutoff
+                    && topic_matches_filter(topic, topic_filter)
+                    && !stored.message.is_expired()
+            })
+            .map(|(_, stored)| stored.message.to_publish_packet())
             .collect()
     }
 
@@ -2353,6 +2434,47 @@ mod tests {
             .await
             .first()
             .map(|message| message.payload.clone())
+    }
+
+    #[tokio::test]
+    async fn subscribe_cutoff_splits_retained_between_snapshot_and_live() {
+        let router = MessageRouter::new();
+        retain(&router, "cut/before", b"before").await;
+        let request = || SubscriptionRequest::new("cut", "cut/#", QoS::AtMostOnce);
+        let (outcome, cutoff) = router
+            .subscribe_for_retained(None, request().with_retain_handling(1))
+            .await
+            .unwrap();
+        assert_eq!(outcome, Subscribed::New);
+        let cutoff = cutoff.unwrap();
+        retain(&router, "cut/after", b"after").await;
+        let snapshot = router.retained_messages_before("cut/#", cutoff).await;
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|m| m.topic_name.as_str())
+                .collect::<Vec<_>>(),
+            ["cut/before"]
+        );
+        assert_eq!(router.get_retained_messages("cut/#").await.len(), 2);
+        let (outcome, cutoff) = router
+            .subscribe_for_retained(None, request().with_retain_handling(1))
+            .await
+            .unwrap();
+        assert_eq!((outcome, cutoff), (Subscribed::Updated, None));
+        let (_, cutoff) = router
+            .subscribe_for_retained(None, request().with_retain_handling(2))
+            .await
+            .unwrap();
+        assert_eq!(cutoff, None);
+        let (_, cutoff) = router
+            .subscribe_for_retained(
+                None,
+                SubscriptionRequest::new("cut", "$share/g/cut/#", QoS::AtMostOnce),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cutoff, None);
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ use super::ClientHandler;
 struct AcceptedFilter<'a> {
     filter: &'a crate::packet::subscribe::TopicFilter,
     stored: StoredSubscription,
-    is_new: bool,
+    retained_cutoff: Option<u64>,
 }
 
 impl ClientHandler {
@@ -81,7 +81,7 @@ impl ClientHandler {
                 &accepted.filter.filter,
                 &accepted.filter.options,
                 subscription_id,
-                accepted.is_new,
+                accepted.retained_cutoff,
             )
             .await?;
         }
@@ -151,25 +151,23 @@ impl ClientHandler {
                         |accepted| accepted.stored.instance,
                     ),
             };
-            let outcome = self
+            let (outcome, retained_cutoff) = self
                 .router
-                .subscribe_as(
+                .subscribe_for_retained(
                     Some(self.generation),
                     MessageRouter::stored_subscription_request(client_id, &filter.filter, &stored),
                 )
                 .await?;
-            let is_new = match outcome {
-                Subscribed::New => true,
-                Subscribed::Updated => false,
-                Subscribed::Fenced => return Ok(None),
-            };
+            if outcome == Subscribed::Fenced {
+                return Ok(None);
+            }
             *reason_code = Some(crate::packet::suback::SubAckReasonCode::from_qos(
                 stored.qos,
             ));
             routed.push(AcceptedFilter {
                 filter,
                 stored,
-                is_new,
+                retained_cutoff,
             });
         }
         Ok(Some(routed))
@@ -327,16 +325,13 @@ impl ClientHandler {
         topic_filter: &str,
         options: &crate::packet::subscribe::SubscriptionOptions,
         subscription_id: Option<u32>,
-        is_new: bool,
+        retained_cutoff: Option<u64>,
     ) -> Result<()> {
-        let should_send = match options.retain_handling {
-            crate::packet::subscribe::RetainHandling::SendAtSubscribe => true,
-            crate::packet::subscribe::RetainHandling::SendAtSubscribeIfNew => is_new,
-            crate::packet::subscribe::RetainHandling::DoNotSend => false,
-        };
-
-        if should_send {
-            let retained = self.router.get_retained_messages(topic_filter).await;
+        if let Some(cutoff) = retained_cutoff {
+            let retained = self
+                .router
+                .retained_messages_before(topic_filter, cutoff)
+                .await;
             debug!(
                 topic = %topic_filter,
                 count = retained.len(),

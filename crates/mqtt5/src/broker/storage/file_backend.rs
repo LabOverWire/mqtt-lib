@@ -262,6 +262,17 @@ impl FileBackend {
     }
 
     async fn write_out(queues_dir: &Path, inflight_dir: &Path, batch: WriteBatch) {
+        for client_id in batch.emptied_inflight {
+            match fs::remove_dir(inflight_dir.join(&client_id)).await {
+                Ok(()) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(e) => warn!(client_id, "Failed to remove empty inflight directory: {e}"),
+            }
+        }
         for client_id in batch.cleared_inflight {
             match fs::remove_dir_all(inflight_dir.join(&client_id)).await {
                 Ok(()) => {}
@@ -699,9 +710,12 @@ impl FileBackend {
                             }
                         }
 
-                        if let Ok(mut dir) = fs::read_dir(&client_dir).await {
+                        let emptied_client = client_dir.file_name().and_then(|name| name.to_str());
+                        if let (Some(client_id), Ok(mut dir)) =
+                            (emptied_client, fs::read_dir(&client_dir).await)
+                        {
                             if dir.next_entry().await.ok().flatten().is_none() {
-                                let _ = fs::remove_dir(&client_dir).await;
+                                self.write_behind.prune_inflight_dir(client_id);
                             }
                         }
                     }
