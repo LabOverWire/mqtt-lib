@@ -108,7 +108,9 @@ impl RoutableMessage {
             .properties
             .get_message_expiry_interval()
             .is_some_and(|interval| {
-                unix_millis_now().saturating_sub(self.received_at_ms) / 1000 > u64::from(interval)
+                interval > 0
+                    && unix_millis_now().saturating_sub(self.received_at_ms)
+                        > u64::from(interval) * 1000
             })
     }
 
