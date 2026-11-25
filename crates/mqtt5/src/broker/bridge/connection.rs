@@ -306,30 +306,80 @@ struct IngressFilter {
     mappings: Vec<TopicMappingCore>,
 }
 
-/// A remote filter this process subscribed, the broker it subscribed it on, and whether its
-/// messages were last routed by topic to every mapping they match, as without identifiers.
-#[derive(Clone)]
-struct RemoteSubscription {
-    broker: ConnectedBroker,
-    filter: String,
-    routed_by_topic: bool,
+/// What this process asked of each remote broker: the filters it subscribed there, and the
+/// mapping filters whose retained messages that broker has delivered.
+#[derive(Default)]
+struct RemoteSubscriptions {
+    held: Vec<(ConnectedBroker, String)>,
+    retained_delivered: Vec<(ConnectedBroker, String)>,
 }
 
-fn retain_handling(
-    held: &[RemoteSubscription],
-    broker: ConnectedBroker,
-    filter: &str,
-    session_present: bool,
-) -> crate::RetainHandling {
-    let on_broker = || held.iter().filter(|held| held.broker == broker);
-    let known = on_broker().any(|held| held.filter == filter);
-    let delivered_by_cover =
-        on_broker().any(|held| held.routed_by_topic && covers(filter, &held.filter));
-    match (known, delivered_by_cover, session_present) {
-        (true, _, _) | (false, _, false) => crate::RetainHandling::SendIfNew,
-        (false, true, true) => crate::RetainHandling::DontSend,
-        (false, false, true) => crate::RetainHandling::SendAtSubscribe,
+impl RemoteSubscriptions {
+    fn holds(&self, broker: ConnectedBroker, filter: &str) -> bool {
+        self.held
+            .iter()
+            .any(|(on, held)| *on == broker && held == filter)
     }
+
+    fn retained_delivered_to(&self, broker: ConnectedBroker, filter: &str) -> bool {
+        self.retained_delivered
+            .iter()
+            .any(|(on, delivered)| *on == broker && delivered == filter)
+    }
+
+    /// Asks for retained messages only when one of the mapping filters a subscription reaches
+    /// has not had them from this broker, or when the broker held no session.
+    fn retain_handling(
+        &self,
+        broker: ConnectedBroker,
+        filter: &str,
+        reaches: &[String],
+        session_present: bool,
+    ) -> crate::RetainHandling {
+        let undelivered = reaches
+            .iter()
+            .any(|reached| !self.retained_delivered_to(broker, reached));
+        match (session_present, undelivered, self.holds(broker, filter)) {
+            (false, _, _) | (true, false, true) => crate::RetainHandling::SendIfNew,
+            (true, true, _) => crate::RetainHandling::SendAtSubscribe,
+            (true, false, false) => crate::RetainHandling::DontSend,
+        }
+    }
+
+    fn subscribed(
+        &mut self,
+        broker: ConnectedBroker,
+        filter: &str,
+        reaches: &[String],
+        retain_handling: crate::RetainHandling,
+        session_present: bool,
+    ) {
+        if !self.holds(broker, filter) {
+            self.held.push((broker, filter.to_string()));
+        }
+        let delivers =
+            !session_present || matches!(retain_handling, crate::RetainHandling::SendAtSubscribe);
+        for reached in reaches {
+            if delivers && !self.retained_delivered_to(broker, reached) {
+                self.retained_delivered.push((broker, reached.clone()));
+            }
+        }
+    }
+
+    fn unsubscribed(&mut self, broker: ConnectedBroker, filter: &str) {
+        self.held
+            .retain(|(on, held)| !(*on == broker && held == filter));
+    }
+}
+
+/// The mapping filters whose messages a subscription to `filter` delivers: only its own with
+/// identifiers, and every filter it covers without them, since those are routed by topic.
+fn reached_filters(filter: &str, filters: &[IngressFilter], with_identifiers: bool) -> Vec<String> {
+    filters
+        .iter()
+        .map(|mapped| mapped.remote_filter.clone())
+        .filter(|mapped| mapped == filter || (!with_identifiers && covers(mapped, filter)))
+        .collect()
 }
 
 fn is_shared(filter: &str) -> bool {
@@ -480,8 +530,7 @@ pub struct BridgeConnection {
     ingress: OnceLock<Ingress>,
     egress: OnceLock<Arc<OutboundQueue>>,
     link: watch::Sender<bool>,
-    /// The remote filters this process has subscribed
-    subscribed: tokio::sync::Mutex<Vec<RemoteSubscription>>,
+    subscribed: tokio::sync::Mutex<RemoteSubscriptions>,
     session_present: AtomicBool,
     server_disconnect: Arc<Mutex<Option<ReasonCode>>>,
     watching_disconnects: AtomicBool,
@@ -528,7 +577,7 @@ impl BridgeConnection {
             ingress: OnceLock::new(),
             egress: OnceLock::new(),
             link: watch::Sender::new(false),
-            subscribed: tokio::sync::Mutex::new(Vec::new()),
+            subscribed: tokio::sync::Mutex::new(RemoteSubscriptions::default()),
             session_present: AtomicBool::new(false),
             server_disconnect: Arc::new(Mutex::new(None)),
             watching_disconnects: AtomicBool::new(false),
@@ -1250,12 +1299,10 @@ impl BridgeConnection {
 
     /// Subscribes the remote to the whole wanted set on every connection: to each distinct
     /// remote filter, or, when the remote does not support subscription identifiers, to the
-    /// filters no other filter covers. A filter this process already subscribed on the same
-    /// broker, or any filter when the remote held no session, asks only for the retained
-    /// messages of a new subscription. On a remote that kept its session, a new filter
-    /// covered by one this process subscribed on the same broker and routed by topic asks for
-    /// none, since that one delivered them to its mappings already. Any other asks for them. Then it unsubscribes the filters it
-    /// subscribed on that broker and no longer wants.
+    /// filters no other filter covers. When the remote held no session, each asks only for
+    /// the retained messages of a new subscription. When it kept its session, each asks for
+    /// them if a mapping it reaches has not had them from that broker, and otherwise for
+    /// none. Then it unsubscribes the filters it subscribed on that broker and no longer wants.
     async fn setup_subscriptions(&self, broker: ConnectedBroker) -> Result<()> {
         let with_identifiers = self.client.subscription_identifiers_available().await;
         let session_present = self.session_present.load(Ordering::Relaxed);
@@ -1275,12 +1322,14 @@ impl BridgeConnection {
             self.subscriptions_without_identifiers(&filters)
         };
 
-        let before = subscribed.clone();
         for (remote_filter, qos, subscription_identifier) in &subscriptions {
+            let reaches = reached_filters(remote_filter, &filters, with_identifiers);
+            let retain_handling =
+                subscribed.retain_handling(broker, remote_filter, &reaches, session_present);
             let options = SubscribeOptions {
                 qos: *qos,
                 subscription_identifier: *subscription_identifier,
-                retain_handling: retain_handling(&before, broker, remote_filter, session_present),
+                retain_handling,
                 ..SubscribeOptions::default()
             };
             let outcome = loop {
@@ -1308,26 +1357,25 @@ impl BridgeConnection {
                 self.drop_connection().await;
                 return Ok(());
             }
-            subscribed.retain(|held| !(held.broker == broker && held.filter == *remote_filter));
-            subscribed.push(RemoteSubscription {
+            subscribed.subscribed(
                 broker,
-                filter: remote_filter.clone(),
-                routed_by_topic: !with_identifiers,
-            });
+                remote_filter,
+                &reaches,
+                retain_handling,
+                session_present,
+            );
             info!(
                 "Bridge '{}' subscribed to remote topic: {} (QoS: {:?})",
                 self.config.name, remote_filter, qos
             );
         }
         let stale: Vec<String> = subscribed
+            .held
             .iter()
-            .filter(|held| {
-                held.broker == broker
-                    && !subscriptions
-                        .iter()
-                        .any(|(wanted, _, _)| *wanted == held.filter)
+            .filter(|(on, held)| {
+                *on == broker && !subscriptions.iter().any(|(wanted, _, _)| wanted == held)
             })
-            .map(|held| held.filter.clone())
+            .map(|(_, held)| held.clone())
             .collect();
         for remote_filter in stale {
             let outcome = loop {
@@ -1346,7 +1394,7 @@ impl BridgeConnection {
                 }
                 debug!(bridge = %self.config.name, filter = %remote_filter, error = %e, "unsubscribe of a filter no longer subscribed failed");
             }
-            subscribed.retain(|held| !(held.broker == broker && held.filter == remote_filter));
+            subscribed.unsubscribed(broker, &remote_filter);
         }
 
         Ok(())
