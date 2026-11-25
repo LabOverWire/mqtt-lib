@@ -79,8 +79,9 @@ pub enum ConnectionEvent {
     Disconnected { reason: DisconnectReason },
     /// An automatic reconnection attempt is about to run.
     Reconnecting { attempt: u32 },
-    /// Automatic reconnection gave up: `max_attempts` was exhausted or no address was
-    /// recorded to reconnect to.
+    /// Automatic reconnection gave up: `max_attempts` was exhausted, the server refused the
+    /// client in a `CONNACK` or `DISCONNECT` with a reason code another attempt cannot fix,
+    /// or no address was recorded to reconnect to.
     ReconnectFailed { error: MqttError },
 }
 

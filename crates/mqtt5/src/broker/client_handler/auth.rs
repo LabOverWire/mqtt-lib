@@ -4,64 +4,82 @@ use crate::packet::auth::AuthPacket;
 use crate::packet::disconnect::DisconnectPacket;
 use crate::packet::Packet;
 use crate::protocol::v5::reason_codes::ReasonCode;
+use tracing::warn;
 
 use super::{AuthState, ClientHandler};
 
 impl ClientHandler {
     pub(super) async fn handle_auth(&mut self, auth: AuthPacket) -> Result<()> {
-        let client_id = match &self.client_id {
-            Some(id) => id.clone(),
-            None => {
-                return Err(MqttError::ProtocolError(
-                    "AUTH received before CONNECT".to_string(),
-                ));
-            }
+        let Some(client_id) = self.client_id.clone() else {
+            return Err(MqttError::ProtocolError(
+                "AUTH received before CONNECT".to_string(),
+            ));
         };
-
-        let auth_method = auth
-            .authentication_method()
-            .ok_or_else(|| {
-                MqttError::ProtocolError("AUTH packet missing authentication method".to_string())
-            })?
-            .to_string();
-
-        if let Some(ref expected_method) = self.auth_method {
-            if auth_method != *expected_method {
-                if self.protocol_version == 5 {
-                    let disconnect = DisconnectPacket::new(ReasonCode::BadAuthenticationMethod);
-                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
-                }
-                return Err(MqttError::ProtocolError(
-                    "Authentication method mismatch".to_string(),
-                ));
+        let Some(expected_method) = self.auth_method.clone() else {
+            return self
+                .refuse_auth(
+                    ReasonCode::ProtocolError,
+                    "AUTH on a connection that did not use enhanced authentication",
+                )
+                .await;
+        };
+        match auth.authentication_method() {
+            None => {
+                return self
+                    .refuse_auth(
+                        ReasonCode::ProtocolError,
+                        "AUTH without an authentication method",
+                    )
+                    .await;
             }
+            Some(method) if method != expected_method => {
+                return self
+                    .refuse_auth(
+                        ReasonCode::BadAuthenticationMethod,
+                        "AUTH with another authentication method",
+                    )
+                    .await;
+            }
+            Some(_) => {}
         }
 
         match auth.reason_code {
             ReasonCode::ContinueAuthentication if self.auth_state == AuthState::InProgress => {
-                self.handle_continue_auth(&auth_method, &auth, &client_id)
+                self.handle_continue_auth(&expected_method, &auth, &client_id)
                     .await
             }
-            ReasonCode::ReAuthenticate => {
-                self.handle_reauthenticate(&auth_method, &auth, &client_id)
+            ReasonCode::ReAuthenticate
+                if self.auth_state != AuthState::NotStarted && self.pending_connect.is_none() =>
+            {
+                self.handle_reauthenticate(&expected_method, &auth, &client_id)
                     .await
             }
-            _ => {
-                if self.protocol_version == 5 {
-                    let disconnect = DisconnectPacket::new(ReasonCode::ProtocolError);
-                    self.write_to_client(Packet::Disconnect(disconnect)).await?;
-                }
-                Err(MqttError::ProtocolError(format!(
-                    "Unexpected AUTH reason code: {:?}",
-                    auth.reason_code
-                )))
+            reason_code => {
+                self.refuse_auth(
+                    ReasonCode::ProtocolError,
+                    &format!("Unexpected AUTH reason code: {reason_code:?}"),
+                )
+                .await
             }
         }
     }
 
-    /// A re-authentication that names a user makes it the connection's and the session's, and
-    /// the session keeps only the subscriptions that user is now authorized for, whether the
-    /// user changed or only what it may do. One that names none keeps them.
+    async fn refuse_auth(&mut self, reason_code: ReasonCode, message: &str) -> Result<()> {
+        warn!(reason_code = ?reason_code, "{message}");
+        if self.pending_connect.take().is_some() {
+            let connack = self.new_connack(false, reason_code);
+            self.write_to_client(Packet::ConnAck(connack)).await?;
+        } else if self.protocol_version == 5 {
+            let disconnect_reason = match reason_code {
+                ReasonCode::BadAuthenticationMethod => ReasonCode::ProtocolError,
+                other => other,
+            };
+            let disconnect = DisconnectPacket::new(disconnect_reason);
+            self.write_to_client(Packet::Disconnect(disconnect)).await?;
+        }
+        Err(MqttError::ProtocolError(message.to_string()))
+    }
+
     async fn adopt_reauthenticated_user(&mut self, user_id: Option<String>) -> Result<()> {
         let Some(user_id) = user_id else {
             return Ok(());
@@ -162,12 +180,6 @@ impl ClientHandler {
         auth: &AuthPacket,
         client_id: &str,
     ) -> Result<()> {
-        if self.auth_state == AuthState::NotStarted || self.pending_connect.is_some() {
-            return Err(MqttError::ProtocolError(
-                "Cannot re-authenticate before initial auth completes".to_string(),
-            ));
-        }
-
         let result = self
             .auth_provider
             .reauthenticate(
