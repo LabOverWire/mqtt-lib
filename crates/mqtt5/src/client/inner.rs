@@ -398,13 +398,20 @@ impl MqttClient {
         }
     }
 
+    fn transport_open_error(transport: &str, error: MqttError) -> MqttError {
+        match error {
+            MqttError::Timeout => MqttError::Timeout,
+            other => MqttError::ConnectionError(format!("{transport} connect failed: {other}")),
+        }
+    }
+
     async fn connect_tcp(addr: std::net::SocketAddr) -> Result<TransportType> {
         let config = TcpConfig::new(addr);
         let mut tcp_transport = TcpTransport::new(config);
         tcp_transport
             .connect()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("TCP connect failed: {e}")))?;
+            .map_err(|e| Self::transport_open_error("TCP", e))?;
         Ok(TransportType::Tcp(tcp_transport))
     }
 
@@ -436,7 +443,7 @@ impl MqttClient {
         tls_transport
             .connect()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("TLS connect failed: {e}")))?;
+            .map_err(|e| Self::transport_open_error("TLS", e))?;
         Ok(TransportType::Tls(Box::new(tls_transport)))
     }
 
@@ -616,7 +623,7 @@ impl MqttClient {
         quic_transport
             .connect()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("QUIC connect failed: {e}")))?;
+            .map_err(|e| Self::transport_open_error("QUIC", e))?;
         Ok(Connected {
             transport: TransportType::Quic(Box::new(quic_transport)),
             quic_built_for: Some(built_for),
