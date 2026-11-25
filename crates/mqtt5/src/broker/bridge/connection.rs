@@ -1390,14 +1390,17 @@ impl BridgeConnection {
     /// filters no other filter covers. When the remote held no session, each asks only for
     /// the retained messages of a new subscription. When it kept its session, each asks for
     /// them if a mapping it reaches has not had them from that broker, and otherwise for
-    /// none. Then it unsubscribes the filters it subscribed on that broker and no longer wants.
+    /// none. Filters the broker does not hold yet are subscribed first, so while a broker that
+    /// kept the session changes how it is subscribed, a message reaches a mapping twice rather
+    /// than not at all. Then it unsubscribes the filters it subscribed on that broker and no
+    /// longer wants.
     async fn setup_subscriptions(&self, broker: ConnectedBroker) -> Result<()> {
         let with_identifiers = self.client.subscription_identifiers_available().await;
         let session_present = self.session_present.load(Ordering::Relaxed);
         let mut subscribed = self.subscribed.lock().await;
         let filters = Arc::new(self.ingress_filters());
         let ingress = self.ingress();
-        let subscriptions: Vec<(String, QoS, Option<u32>)> = if with_identifiers {
+        let mut subscriptions: Vec<(String, QoS, Option<u32>)> = if with_identifiers {
             filters
                 .iter()
                 .enumerate()
@@ -1409,6 +1412,7 @@ impl BridgeConnection {
         } else {
             self.subscriptions_without_identifiers(&filters)
         };
+        subscriptions.sort_by_key(|(filter, _, _)| subscribed.holds(broker, filter));
 
         for (remote_filter, qos, subscription_identifier) in &subscriptions {
             let reaches = reached_filters(remote_filter, &filters, with_identifiers);
