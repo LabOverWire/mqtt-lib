@@ -16,7 +16,9 @@ use crate::transport::websocket::{WebSocketConfig, WebSocketTransport};
 #[cfg(all(not(target_arch = "wasm32"), feature = "transport-quic"))]
 use crate::transport::QuicTransport;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::transport::{TcpTransport, TlsTransport, TransportType};
+use crate::transport::{
+    certificate_name, unbracketed_host, TcpTransport, TlsTransport, TransportType,
+};
 
 use super::connection::ConnectionEvent;
 use super::direct::{AutomaticReconnectLifecycle, DirectClientInner, StoredSubscription};
@@ -295,14 +297,6 @@ impl MqttClient {
         Ok(to.to_string())
     }
 
-    /// The name a certificate is checked against for `host`: an IPv6 address
-    /// without the brackets it is written with in a URL
-    fn server_name(host: &str) -> &str {
-        host.strip_prefix('[')
-            .and_then(|address| address.strip_suffix(']'))
-            .unwrap_or(host)
-    }
-
     /// Splits a host:port string
     ///
     /// # Errors
@@ -333,7 +327,7 @@ impl MqttClient {
         let addr_str = format!("{host}:{port}");
         tracing::debug!(addr_str = %addr_str, "🌐 DNS RESOLUTION - Starting address resolution");
 
-        let addrs: Vec<_> = tokio::net::lookup_host(addr_str.as_str())
+        let addrs: Vec<_> = tokio::net::lookup_host((unbracketed_host(host), port))
             .await
             .map_err(|e| {
                 tracing::error!(addr_str = %addr_str, error = %e, "🌐 DNS RESOLUTION - Failed to resolve address");
@@ -379,7 +373,7 @@ impl MqttClient {
                 Some(given) => {
                     let mut config = given.clone();
                     config.addr = addr;
-                    config.hostname = Self::server_name(host).to_string();
+                    config.hostname = certificate_name(host).to_string();
                     Self::open_tls(config).await.map(Connected::from)
                 }
                 None => self.connect_tls(addr, host).await.map(Connected::from),
@@ -430,12 +424,12 @@ impl MqttClient {
             );
             let mut cfg = existing_config.clone();
             cfg.addr = addr;
-            cfg.hostname = Self::server_name(host).to_string();
+            cfg.hostname = certificate_name(host).to_string();
             cfg.verify_server_cert = !insecure;
             cfg
         } else {
             tracing::debug!("No stored TLS config, using default");
-            TlsConfig::new(addr, Self::server_name(host)).with_verify_server_cert(!insecure)
+            TlsConfig::new(addr, certificate_name(host)).with_verify_server_cert(!insecure)
         };
         drop(tls_config_lock);
         Self::open_tls(config).await
@@ -548,13 +542,13 @@ impl MqttClient {
         let tls_config = match stored {
             Some(mut cfg) => {
                 cfg.addr = addr;
-                cfg.hostname = Self::server_name(host).to_string();
+                cfg.hostname = certificate_name(host).to_string();
                 cfg.verify_server_cert = !insecure;
                 cfg.alpn_protocols = None;
                 Some(cfg)
             }
             None if insecure => {
-                Some(TlsConfig::new(addr, Self::server_name(host)).with_verify_server_cert(false))
+                Some(TlsConfig::new(addr, certificate_name(host)).with_verify_server_cert(false))
             }
             None => None,
         };
@@ -594,7 +588,7 @@ impl MqttClient {
             datagrams: qc.datagrams,
             max_streams: qc.max_streams,
         };
-        let server_name = if host.parse::<std::net::IpAddr>().is_ok() {
+        let server_name = if certificate_name(host).parse::<std::net::IpAddr>().is_ok() {
             "localhost"
         } else {
             host
@@ -659,7 +653,9 @@ impl MqttClient {
             .server_name
             .as_ref()
             .filter(|(for_host, _)| for_host.eq_ignore_ascii_case(host))
-            .map_or(host, |(_, server_name)| server_name.as_str());
+            .map_or(certificate_name(host), |(_, server_name)| {
+                server_name.as_str()
+            });
         let mut config = QuicConfig::new(addr, server_name)
             .with_verify_server_cert(!qc.insecure_tls)
             .with_stream_strategy(qc.stream_strategy)
@@ -725,6 +721,20 @@ impl MqttClient {
         Ok(())
     }
 
+    async fn open_at(
+        &self,
+        addr: std::net::SocketAddr,
+        transport_type: ClientTransportType,
+        host: &str,
+        given_tls: Option<&TlsConfig>,
+    ) -> (std::net::SocketAddr, Result<Connected>) {
+        tracing::debug!("Trying to connect to address: {}", addr);
+        let opened = self
+            .try_connect_address(addr, transport_type, host, given_tls)
+            .await;
+        (addr, opened)
+    }
+
     pub(crate) async fn try_connect_to_addresses(
         &self,
         addresses: &[std::net::SocketAddr],
@@ -732,21 +742,38 @@ impl MqttClient {
         host: &str,
         given_tls: Option<&TlsConfig>,
     ) -> Result<ConnectResult> {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
         let mut last_error = None;
+        let mut remaining = addresses.to_vec();
 
-        for addr in addresses {
-            tracing::debug!("Trying to connect to address: {}", addr);
-
-            let connected = match self
-                .try_connect_address(*addr, transport_type.clone(), host, given_tls)
-                .await
-            {
-                Ok(connected) => connected,
-                Err(e) => {
-                    tracing::debug!("Failed to connect to {}: {}", addr, e);
-                    last_error = Some(e);
-                    continue;
+        while !remaining.is_empty() {
+            let opened_together = if transport_type.opens_concurrently() {
+                remaining.len()
+            } else {
+                1
+            };
+            let mut opening: FuturesUnordered<_> = remaining[..opened_together]
+                .iter()
+                .map(|&addr| self.open_at(addr, transport_type.clone(), host, given_tls))
+                .collect();
+            let mut first_opened = None;
+            while let Some((addr, opened)) = opening.next().await {
+                remaining.retain(|&waiting| waiting != addr);
+                match opened {
+                    Ok(connected) => {
+                        first_opened = Some(connected);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to connect to {}: {}", addr, e);
+                        last_error = Some(Self::worse_connect_error(last_error, e));
+                    }
                 }
+            }
+            drop(opening);
+            let Some(connected) = first_opened else {
+                continue;
             };
 
             let mut inner = self.inner.write().await;
@@ -787,7 +814,7 @@ impl MqttClient {
                 }
                 Err(e) => {
                     drop(inner);
-                    last_error = Some(e);
+                    last_error = Some(Self::worse_connect_error(last_error, e));
                 }
             }
         }
@@ -1072,6 +1099,13 @@ impl MqttClient {
         tokio::spawn(async move {
             client.monitor_connection(connect).await;
         });
+    }
+
+    fn worse_connect_error(earlier: Option<MqttError>, later: MqttError) -> MqttError {
+        match earlier {
+            Some(refusal) if Self::refused_for_good(&refusal) => refusal,
+            _ => later,
+        }
     }
 
     /// Whether another attempt can't help: the server refused this client or its credentials,
