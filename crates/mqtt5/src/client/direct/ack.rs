@@ -493,14 +493,14 @@ impl AckCallbackManager {
         removed_exact || wildcard.len() < before
     }
 
-    /// Finds the single best-matching callback for a topic: an exact match wins,
-    /// otherwise the first matching wildcard.
+    /// Finds the single best-matching callback for a topic: the exact match registered last
+    /// wins, otherwise the first matching wildcard.
     pub(crate) fn find_one(&self, topic: &str) -> Option<AckPublishCallback> {
         if let Some(entry) = self
             .exact
             .lock()
             .get(topic)
-            .and_then(|entries| entries.first())
+            .and_then(|entries| entries.last())
         {
             return Some(Arc::clone(&entry.callback));
         }
