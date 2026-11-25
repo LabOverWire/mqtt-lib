@@ -386,8 +386,12 @@ impl DirectClientInner {
         self.connected.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn forget_disconnect_reason(&self) {
-        *self.last_disconnect_reason.lock() = None;
+    pub(crate) fn forget_disconnect_reason(&self) -> Option<DisconnectReason> {
+        self.last_disconnect_reason.lock().take()
+    }
+
+    pub(crate) fn restore_disconnect_reason(&self, reason: Option<DisconnectReason>) {
+        *self.last_disconnect_reason.lock() = reason;
     }
 
     pub(crate) fn ended_by_server_disconnect(&self) -> Option<MqttError> {
@@ -693,7 +697,7 @@ impl DirectClientInner {
         let replay_writer = Arc::downgrade(&writer_arc);
         self.writer = Some(writer_arc);
         self.connection_alive = Some(Arc::new(watch::channel(true).0));
-        self.forget_disconnect_reason();
+        self.restore_disconnect_reason(None);
         self.set_connected(true);
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");

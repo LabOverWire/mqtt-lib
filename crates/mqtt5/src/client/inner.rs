@@ -1,3 +1,4 @@
+use crate::client::connection::DisconnectReason;
 use crate::error::{MqttError, Result};
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::types::{ConnectOptions, ConnectResult};
@@ -75,6 +76,7 @@ pub(crate) struct ReplacedByConnect {
     reconnect_attempt: u32,
     monitored: bool,
     stored_tls: StoredTlsBeforeConnect,
+    disconnect_reason: Option<DisconnectReason>,
 }
 
 enum StoredTlsBeforeConnect {
@@ -989,9 +991,9 @@ impl MqttClient {
             reconnect_attempt: inner.reconnect_attempt,
             monitored: *self.monitored_connect.lock() == Some(inner.connects),
             stored_tls: StoredTlsBeforeConnect::Untouched,
+            disconnect_reason: inner.forget_disconnect_reason(),
         };
         inner.reconnect_attempt = 0;
-        inner.forget_disconnect_reason();
         inner.connects += 1;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Armed;
         Ok(ConnectInProgress {
@@ -1039,6 +1041,7 @@ impl MqttClient {
         inner.auth_method = replaced.auth_method;
         inner.reconnection = replaced.reconnection;
         inner.reconnect_attempt = replaced.reconnect_attempt;
+        inner.restore_disconnect_reason(replaced.disconnect_reason);
         inner.connects += 1;
         inner.automatic_reconnect_lifecycle = if stays_armed {
             AutomaticReconnectLifecycle::Armed
