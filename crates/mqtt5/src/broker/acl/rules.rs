@@ -39,7 +39,7 @@ fn pattern_matches(
 
 /// Whether every topic that `topic_or_filter` names matches `pattern`: a filter is within a
 /// pattern only if the pattern covers each topic it subscribes to.
-fn within_pattern(topic_or_filter: &str, pattern: &str) -> bool {
+pub(crate) fn within_pattern(topic_or_filter: &str, pattern: &str) -> bool {
     if !topic_or_filter.contains(['+', '#']) {
         return topic_matches_filter(topic_or_filter, pattern);
     }

@@ -3,9 +3,10 @@
 //! Manages a single bridge connection to a remote broker using our existing
 //! `MqttClient` implementation.
 
+use crate::broker::acl::rules::within_pattern;
 use crate::broker::bridge::{BridgeConfig, BridgeError, BridgeProtocol, BridgeStats, Result};
 use crate::broker::router::MessageRouter;
-use crate::client::MqttClient;
+use crate::client::{ConnectionEvent, DisconnectReason, MqttClient};
 use crate::error::MqttError;
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
@@ -13,7 +14,7 @@ use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
 use crate::types::ConnectOptions;
 use crate::types::PublishOptions;
-use crate::validation::topic_matches_filter;
+use crate::validation::{parse_shared_subscription, topic_matches_filter};
 use crate::{AckToken, IndeterminateReason, PublishHandle, PublishOutcome, QoS, SubscribeOptions};
 use bytes::Bytes;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -305,6 +306,136 @@ struct IngressFilter {
     mappings: Vec<TopicMappingCore>,
 }
 
+/// What this process asked of each remote broker: the filters it subscribed there, and the
+/// mapping filters whose retained messages that broker has delivered.
+#[derive(Default)]
+struct RemoteSubscriptions {
+    held: Vec<(ConnectedBroker, String)>,
+    retained_delivered: Vec<(ConnectedBroker, String)>,
+}
+
+impl RemoteSubscriptions {
+    fn holds(&self, broker: ConnectedBroker, filter: &str) -> bool {
+        self.held
+            .iter()
+            .any(|(on, held)| *on == broker && held == filter)
+    }
+
+    fn retained_delivered_to(&self, broker: ConnectedBroker, filter: &str) -> bool {
+        self.retained_delivered
+            .iter()
+            .any(|(on, delivered)| *on == broker && delivered == filter)
+    }
+
+    /// Asks for retained messages only when one of the mapping filters a subscription reaches
+    /// has not had them from this broker, or when the broker held no session.
+    fn retain_handling(
+        &self,
+        broker: ConnectedBroker,
+        filter: &str,
+        reaches: &[String],
+        session_present: bool,
+    ) -> crate::RetainHandling {
+        let undelivered = reaches
+            .iter()
+            .any(|reached| !self.retained_delivered_to(broker, reached));
+        match (session_present, undelivered, self.holds(broker, filter)) {
+            (false, _, _) | (true, false, true) => crate::RetainHandling::SendIfNew,
+            (true, true, _) => crate::RetainHandling::SendAtSubscribe,
+            (true, false, false) => crate::RetainHandling::DontSend,
+        }
+    }
+
+    fn subscribed(
+        &mut self,
+        broker: ConnectedBroker,
+        filter: &str,
+        reaches: &[String],
+        retain_handling: crate::RetainHandling,
+        session_present: bool,
+    ) {
+        if !self.holds(broker, filter) {
+            self.held.push((broker, filter.to_string()));
+        }
+        let delivers =
+            !session_present || matches!(retain_handling, crate::RetainHandling::SendAtSubscribe);
+        for reached in reaches {
+            if delivers && !self.retained_delivered_to(broker, reached) {
+                self.retained_delivered.push((broker, reached.clone()));
+            }
+        }
+    }
+
+    fn unsubscribed(&mut self, broker: ConnectedBroker, filter: &str) {
+        self.held
+            .retain(|(on, held)| !(*on == broker && held == filter));
+    }
+}
+
+/// The mapping filters whose messages a subscription to `filter` delivers: only its own with
+/// identifiers, and every filter it covers without them, since those are routed by topic.
+fn reached_filters(filter: &str, filters: &[IngressFilter], with_identifiers: bool) -> Vec<String> {
+    filters
+        .iter()
+        .map(|mapped| mapped.remote_filter.clone())
+        .filter(|mapped| mapped == filter || (!with_identifiers && covers(mapped, filter)))
+        .collect()
+}
+
+fn is_shared(filter: &str) -> bool {
+    filter.starts_with("$share/")
+}
+
+fn covers(filter: &str, by: &str) -> bool {
+    !is_shared(filter) && !is_shared(by) && within_pattern(filter, by)
+}
+
+fn filters_overlap(first: &str, second: &str) -> bool {
+    let (first, _) = parse_shared_subscription(first);
+    let (second, _) = parse_shared_subscription(second);
+    let wildcard_start = |filter: &str| filter.starts_with(['+', '#']);
+    if (first.starts_with('$') && wildcard_start(second))
+        || (second.starts_with('$') && wildcard_start(first))
+    {
+        return false;
+    }
+    let mut first_levels = first.split('/');
+    let mut second_levels = second.split('/');
+    loop {
+        match (first_levels.next(), second_levels.next()) {
+            (Some("#"), _) | (_, Some("#")) | (None, None) => return true,
+            (Some(left), Some(right)) if left == right || left == "+" || right == "+" => {}
+            _ => return false,
+        }
+    }
+}
+
+fn subscriptions_without_identifiers(filters: &[IngressFilter]) -> Vec<(String, QoS)> {
+    filters
+        .iter()
+        .enumerate()
+        .filter(|(index, filter)| {
+            !filters.iter().enumerate().any(|(other, by)| {
+                other != *index
+                    && covers(&filter.remote_filter, &by.remote_filter)
+                    && (other < *index || !covers(&by.remote_filter, &filter.remote_filter))
+            })
+        })
+        .map(|(_, kept)| {
+            let qos = filters
+                .iter()
+                .filter(|covered| {
+                    covered.remote_filter == kept.remote_filter
+                        || covers(&covered.remote_filter, &kept.remote_filter)
+                })
+                .map(|covered| covered.qos)
+                .max_by_key(|qos| *qos as u8)
+                .unwrap_or(kept.qos);
+            (kept.remote_filter.clone(), qos)
+        })
+        .collect()
+}
+
 /// Connect options for the remote-facing client: a persistent deferred-ack session whose
 /// receive maximum equals the ingress lane, so the remote never sends more than the bridge
 /// can hold unacknowledged. The bridge reconnects by its own loop, so the client doesn't.
@@ -399,8 +530,10 @@ pub struct BridgeConnection {
     ingress: OnceLock<Ingress>,
     egress: OnceLock<Arc<OutboundQueue>>,
     link: watch::Sender<bool>,
-    /// Whether the remote subscriptions have been registered for this connection's lifetime
-    subscribed: AtomicBool,
+    subscribed: tokio::sync::Mutex<RemoteSubscriptions>,
+    session_present: AtomicBool,
+    server_disconnect: Arc<Mutex<Option<ReasonCode>>>,
+    watching_disconnects: AtomicBool,
 }
 
 impl Drop for BridgeConnection {
@@ -444,7 +577,10 @@ impl BridgeConnection {
             ingress: OnceLock::new(),
             egress: OnceLock::new(),
             link: watch::Sender::new(false),
-            subscribed: AtomicBool::new(false),
+            subscribed: tokio::sync::Mutex::new(RemoteSubscriptions::default()),
+            session_present: AtomicBool::new(false),
+            server_disconnect: Arc::new(Mutex::new(None)),
+            watching_disconnects: AtomicBool::new(false),
         })
     }
 
@@ -647,7 +783,11 @@ impl BridgeConnection {
                 .connect_with_tls_and_options(tls_config, options.clone())
                 .await
             {
-                Ok(_) => return Ok(()),
+                Ok(result) => {
+                    self.session_present
+                        .store(result.session_present, Ordering::Relaxed);
+                    return Ok(());
+                }
                 Err(e) => last_error = e.to_string(),
             }
         }
@@ -663,7 +803,9 @@ impl BridgeConnection {
         )
         .await
         {
-            Ok(_) => {
+            Ok(result) => {
+                self.session_present
+                    .store(result.session_present, Ordering::Relaxed);
                 info!(
                     "Bridge '{}' connected to primary broker: {}",
                     self.config.name, self.config.remote_address
@@ -686,7 +828,9 @@ impl BridgeConnection {
             )
             .await
             {
-                Ok(_) => {
+                Ok(result) => {
+                    self.session_present
+                        .store(result.session_present, Ordering::Relaxed);
                     info!(
                         "Bridge '{}' connected to backup broker: {}",
                         self.config.name, backup
@@ -749,7 +893,9 @@ impl BridgeConnection {
         )
         .await
         {
-            Ok(_) => {
+            Ok(result) => {
+                self.session_present
+                    .store(result.session_present, Ordering::Relaxed);
                 info!(
                     "Bridge '{}' connected to primary broker: {} (QUIC{})",
                     self.config.name,
@@ -774,7 +920,9 @@ impl BridgeConnection {
             )
             .await
             {
-                Ok(_) => {
+                Ok(result) => {
+                    self.session_present
+                        .store(result.session_present, Ordering::Relaxed);
                     info!(
                         "Bridge '{}' connected to backup broker: {} (QUIC{})",
                         self.config.name,
@@ -1149,41 +1297,196 @@ impl BridgeConnection {
         Ok(())
     }
 
-    /// Subscribes once per distinct remote filter for the bridge's lifetime; the client
-    /// restores them itself after a lost session.
-    async fn setup_subscriptions(&self) -> Result<()> {
-        if self.subscribed.load(Ordering::Acquire) {
-            return Ok(());
-        }
+    /// Subscribes the remote to the whole wanted set on every connection: to each distinct
+    /// remote filter, or, when the remote does not support subscription identifiers, to the
+    /// filters no other filter covers. When the remote held no session, each asks only for
+    /// the retained messages of a new subscription. When it kept its session, each asks for
+    /// them if a mapping it reaches has not had them from that broker, and otherwise for
+    /// none. Filters the broker does not hold yet are subscribed first, so while a broker that
+    /// kept the session changes how it is subscribed, a message reaches a mapping twice rather
+    /// than not at all. Then it unsubscribes the filters it subscribed on that broker and no
+    /// longer wants.
+    async fn setup_subscriptions(&self, broker: ConnectedBroker) -> Result<()> {
+        let with_identifiers = self.client.subscription_identifiers_available().await;
+        let session_present = self.session_present.load(Ordering::Relaxed);
+        let mut subscribed = self.subscribed.lock().await;
         let filters = Arc::new(self.ingress_filters());
         let ingress = self.ingress();
+        let mut subscriptions: Vec<(String, QoS, Option<u32>)> = if with_identifiers {
+            filters
+                .iter()
+                .enumerate()
+                .map(|(index, filter)| {
+                    let identifier = u32::try_from(index + 1).unwrap_or(u32::MAX);
+                    (filter.remote_filter.clone(), filter.qos, Some(identifier))
+                })
+                .collect()
+        } else {
+            self.subscriptions_without_identifiers(&filters)
+        };
+        subscriptions.sort_by_key(|(filter, _, _)| subscribed.holds(broker, filter));
 
-        for (index, filter) in filters.iter().enumerate() {
-            let subscription_id = u32::try_from(index + 1).unwrap_or(u32::MAX);
-            let callback = self.ingress_callback(
-                Arc::clone(&filters),
-                ingress.qos1_tx.clone(),
-                ingress.qos0_tx.clone(),
-            );
+        for (remote_filter, qos, subscription_identifier) in &subscriptions {
+            let reaches = reached_filters(remote_filter, &filters, with_identifiers);
+            let retain_handling =
+                subscribed.retain_handling(broker, remote_filter, &reaches, session_present);
             let options = SubscribeOptions {
-                qos: filter.qos,
-                subscription_identifier: Some(subscription_id),
+                qos: *qos,
+                subscription_identifier: *subscription_identifier,
+                retain_handling,
                 ..SubscribeOptions::default()
             };
-            self.client
-                .subscribe_with_ack(filter.remote_filter.clone(), options, callback)
-                .await?;
+            let outcome = loop {
+                let callback = self.ingress_callback(
+                    Arc::clone(&filters),
+                    ingress.qos1_tx.clone(),
+                    ingress.qos0_tx.clone(),
+                );
+                match self
+                    .client
+                    .subscribe_with_ack(remote_filter.clone(), options.clone(), callback)
+                    .await
+                {
+                    Err(MqttError::PacketIdExhausted) if self.client.is_connected().await => {
+                        tokio::time::sleep(EGRESS_RETRY_DELAY).await;
+                    }
+                    outcome => break outcome,
+                }
+            };
+            if let Err(e) = outcome {
+                if !self.connection_failed(&e).await {
+                    return Err(e.into());
+                }
+                warn!(bridge = %self.config.name, filter = %remote_filter, error = %e, "connection lost while subscribing; subscribing again after reconnecting");
+                self.drop_connection().await;
+                return Ok(());
+            }
+            subscribed.subscribed(
+                broker,
+                remote_filter,
+                &reaches,
+                retain_handling,
+                session_present,
+            );
             info!(
-                "Bridge '{}' subscribed to remote topic: {} (QoS: {:?}, {} mapping(s))",
-                self.config.name,
-                filter.remote_filter,
-                filter.qos,
-                filter.mappings.len()
+                "Bridge '{}' subscribed to remote topic: {} (QoS: {:?})",
+                self.config.name, remote_filter, qos
             );
         }
-        self.subscribed.store(true, Ordering::Release);
+        let stale: Vec<String> = subscribed
+            .held
+            .iter()
+            .filter(|(on, held)| {
+                *on == broker && !subscriptions.iter().any(|(wanted, _, _)| wanted == held)
+            })
+            .map(|(_, held)| held.clone())
+            .collect();
+        for remote_filter in stale {
+            let outcome = loop {
+                match self.client.unsubscribe(remote_filter.clone()).await {
+                    Err(MqttError::PacketIdExhausted) if self.client.is_connected().await => {
+                        tokio::time::sleep(EGRESS_RETRY_DELAY).await;
+                    }
+                    outcome => break outcome,
+                }
+            };
+            if let Err(e) = outcome {
+                if !self.client.is_connected().await || self.connection_failed(&e).await {
+                    warn!(bridge = %self.config.name, filter = %remote_filter, error = %e, "connection lost while unsubscribing; unsubscribing again after reconnecting");
+                    self.drop_connection().await;
+                    return Ok(());
+                }
+                debug!(bridge = %self.config.name, filter = %remote_filter, error = %e, "unsubscribe of a filter no longer subscribed failed");
+            }
+            subscribed.unsubscribed(broker, &remote_filter);
+        }
 
         Ok(())
+    }
+
+    async fn connection_failed(&self, error: &MqttError) -> bool {
+        if matches!(error, MqttError::SubscriptionDenied(_)) || self.refused_by_disconnect() {
+            return false;
+        }
+        matches!(
+            error,
+            MqttError::Io(_)
+                | MqttError::Timeout
+                | MqttError::NotConnected
+                | MqttError::ConnectionError(_)
+                | MqttError::ConnectionClosedByPeer
+        ) || !self.client.is_connected().await
+    }
+
+    fn refused_by_disconnect(&self) -> bool {
+        matches!(
+            *self
+                .server_disconnect
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            Some(
+                ReasonCode::TopicFilterInvalid
+                    | ReasonCode::SharedSubscriptionsNotSupported
+                    | ReasonCode::SubscriptionIdentifiersNotSupported
+                    | ReasonCode::WildcardSubscriptionsNotSupported
+            )
+        )
+    }
+
+    async fn watch_disconnects(&self) -> Result<()> {
+        if self.watching_disconnects.swap(true, Ordering::Relaxed) {
+            return Ok(());
+        }
+        let server_disconnect = Arc::clone(&self.server_disconnect);
+        self.client
+            .on_connection_event(move |event| {
+                let reason = match event {
+                    ConnectionEvent::Disconnected {
+                        reason: DisconnectReason::ServerDisconnect(reason_code),
+                    } => Some(reason_code),
+                    _ => None,
+                };
+                *server_disconnect
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = reason;
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn drop_connection(&self) {
+        if let Err(e) = self.client.disconnect().await {
+            debug!(bridge = %self.config.name, error = %e, "bridge client disconnect after a failed setup failed");
+        }
+    }
+
+    fn subscriptions_without_identifiers(
+        &self,
+        filters: &[IngressFilter],
+    ) -> Vec<(String, QoS, Option<u32>)> {
+        let subscriptions = subscriptions_without_identifiers(filters);
+        info!(
+            bridge = %self.config.name,
+            filters = filters.len(),
+            subscriptions = subscriptions.len(),
+            "Remote does not support subscription identifiers; subscribing without them, to the filters no other filter covers"
+        );
+        for (index, (first, _)) in subscriptions.iter().enumerate() {
+            for (second, _) in &subscriptions[index + 1..] {
+                if filters_overlap(first, second) {
+                    warn!(
+                        bridge = %self.config.name,
+                        first = %first,
+                        second = %second,
+                        "Remote does not support subscription identifiers and these remote filters overlap; a message matching both can be delivered locally more than once, and a shared filter's mappings also get what the remote delivered through the other filter"
+                    );
+                }
+            }
+        }
+        subscriptions
+            .into_iter()
+            .map(|(filter, qos)| (filter, qos, None))
+            .collect()
     }
 
     /// The callback every remote filter shares: maps one remote delivery to its local
@@ -1197,7 +1500,7 @@ impl BridgeConnection {
         let bridge_name = self.config.name.clone();
         let stats_received = Arc::clone(&self.messages_received);
         let stats_bytes = Arc::clone(&self.bytes_received);
-        let warned_missing_ids = Arc::new(AtomicBool::new(false));
+        let noted_missing_ids = Arc::new(AtomicBool::new(false));
 
         move |mut publish, token| {
             stats_received.fetch_add(1, Ordering::Relaxed);
@@ -1209,16 +1512,17 @@ impl BridgeConnection {
             publish.properties.inject_client_id(None);
 
             let mappings: Vec<&TopicMappingCore> = if ids.is_empty() {
-                if !warned_missing_ids.swap(true, Ordering::Relaxed) {
-                    warn!(
+                if !noted_missing_ids.swap(true, Ordering::Relaxed) {
+                    debug!(
                         bridge = %bridge_name,
-                        "Remote sends no subscription identifiers; overlapping mappings may deliver copies"
+                        "Remote sends no subscription identifiers; routing by topic"
                     );
                 }
                 filters
                     .iter()
                     .filter(|filter| {
-                        topic_matches_filter(&publish.topic_name, &filter.remote_filter)
+                        let (remote_filter, _) = parse_shared_subscription(&filter.remote_filter);
+                        topic_matches_filter(&publish.topic_name, remote_filter)
                     })
                     .flat_map(|filter| filter.mappings.iter())
                     .collect()
@@ -1236,6 +1540,9 @@ impl BridgeConnection {
                 .map(|mapping| {
                     let mut packet = publish.clone();
                     packet.topic_name = mapping.apply_local_prefix(&publish.topic_name);
+                    if (mapping.qos as u8) < (packet.qos as u8) {
+                        packet.qos = mapping.qos;
+                    }
                     packet
                 })
                 .collect();
@@ -1332,7 +1639,6 @@ impl BridgeConnection {
 
     /// Updates stats when connected
     async fn update_connected_stats(&self, broker: ConnectedBroker, address: &str) {
-        self.link.send_replace(true);
         let mut stats = self.stats.write().await;
         stats.connected = true;
         stats.connected_since = Some(Instant::now());
@@ -1415,6 +1721,15 @@ impl BridgeConnection {
         stats.connected_since = None;
     }
 
+    async fn mark_disconnected(&self) {
+        self.stop_health_check().await;
+        *self.current_broker.write().await = None;
+        let mut stats = self.stats.write().await;
+        stats.connected = false;
+        self.link.send_replace(false);
+        stats.connected_since = None;
+    }
+
     /// Runs a single connection until disconnected
     async fn run_connection(&self) -> Result<()> {
         if self.client.is_connected().await {
@@ -1422,8 +1737,17 @@ impl BridgeConnection {
         } else {
             self.client.set_queue_on_disconnect(false).await;
             self.register_ingress_callbacks().await?;
-            Box::pin(self.connect()).await?;
-            self.setup_subscriptions().await?;
+            self.watch_disconnects().await?;
+            self.client.forget_ack_subscriptions().await;
+            let broker = Box::pin(self.connect()).await?;
+            if let Err(e) = self.setup_subscriptions(broker).await {
+                self.drop_connection().await;
+                self.mark_disconnected().await;
+                return Err(e);
+            }
+            if self.client.is_connected().await {
+                self.link.send_replace(true);
+            }
         }
 
         loop {
@@ -1434,12 +1758,7 @@ impl BridgeConnection {
                     "Bridge '{}' disconnected from remote broker",
                     self.config.name
                 );
-                self.stop_health_check().await;
-                *self.current_broker.write().await = None;
-                let mut stats = self.stats.write().await;
-                stats.connected = false;
-                self.link.send_replace(false);
-                stats.connected_since = None;
+                self.mark_disconnected().await;
                 break;
             }
 
@@ -1449,5 +1768,97 @@ impl BridgeConnection {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{filters_overlap, subscriptions_without_identifiers, IngressFilter};
+    use crate::QoS;
+
+    fn filter(remote_filter: &str, qos: QoS) -> IngressFilter {
+        IngressFilter {
+            remote_filter: remote_filter.to_string(),
+            qos,
+            mappings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn filters_overlap_when_some_topic_matches_both() {
+        for (first, second, overlap) in [
+            ("a/#", "a/b", true),
+            ("a/#", "a", true),
+            ("a/+/c", "a/b/#", true),
+            ("a/+", "a/b/c", false),
+            ("a/b", "a/c", false),
+            ("+/x", "y/+", true),
+            ("#", "$SYS/#", false),
+            ("+/a", "$SYS/a", false),
+            ("$SYS/#", "$SYS/broker", true),
+            ("a/b", "a/b/c", false),
+            ("$share/g/a/b", "a/#", true),
+            ("$share/g/a/b", "$share/h/a/c", false),
+        ] {
+            assert_eq!(
+                filters_overlap(first, second),
+                overlap,
+                "{first} and {second}"
+            );
+            assert_eq!(
+                filters_overlap(second, first),
+                overlap,
+                "{second} and {first}"
+            );
+        }
+    }
+
+    #[test]
+    fn without_identifiers_only_filters_no_other_covers_are_subscribed() {
+        let filters = [
+            filter("sensors/+/temp", QoS::ExactlyOnce),
+            filter("sensors/#", QoS::AtMostOnce),
+            filter("alerts/x", QoS::AtLeastOnce),
+            filter("a/+/c", QoS::AtMostOnce),
+            filter("a/b/#", QoS::AtMostOnce),
+        ];
+        assert_eq!(
+            subscriptions_without_identifiers(&filters),
+            vec![
+                ("sensors/#".to_string(), QoS::ExactlyOnce),
+                ("alerts/x".to_string(), QoS::AtLeastOnce),
+                ("a/+/c".to_string(), QoS::AtMostOnce),
+                ("a/b/#".to_string(), QoS::AtMostOnce),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_identifiers_filters_that_cover_each_other_keep_the_first() {
+        let filters = [
+            filter("+/#", QoS::AtMostOnce),
+            filter("#", QoS::AtLeastOnce),
+        ];
+        assert_eq!(
+            subscriptions_without_identifiers(&filters),
+            vec![("+/#".to_string(), QoS::AtLeastOnce)]
+        );
+    }
+
+    #[test]
+    fn without_identifiers_shared_filters_are_never_dropped() {
+        let filters = [
+            filter("$share/g/a/b", QoS::AtLeastOnce),
+            filter("$share/g/a/#", QoS::AtMostOnce),
+            filter("a/#", QoS::AtMostOnce),
+        ];
+        assert_eq!(
+            subscriptions_without_identifiers(&filters),
+            vec![
+                ("$share/g/a/b".to_string(), QoS::AtLeastOnce),
+                ("$share/g/a/#".to_string(), QoS::AtMostOnce),
+                ("a/#".to_string(), QoS::AtMostOnce),
+            ]
+        );
     }
 }
