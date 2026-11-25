@@ -743,31 +743,35 @@ impl MqttClient {
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let mut last_error = None;
-        let opened_together = if transport_type.opens_concurrently() {
-            addresses.len()
-        } else {
-            1
-        };
-        let mut waiting = addresses.iter().copied();
-        let mut opening: FuturesUnordered<_> = waiting
-            .by_ref()
-            .take(opened_together)
-            .map(|addr| self.open_at(addr, transport_type.clone(), host, given_tls))
-            .collect();
+        let mut remaining = addresses.to_vec();
 
-        while let Some((addr, opened)) = opening.next().await {
-            opening.extend(
-                waiting
-                    .next()
-                    .map(|next| self.open_at(next, transport_type.clone(), host, given_tls)),
-            );
-            let connected = match opened {
-                Ok(connected) => connected,
-                Err(e) => {
-                    tracing::debug!("Failed to connect to {}: {}", addr, e);
-                    last_error = Some(e);
-                    continue;
+        while !remaining.is_empty() {
+            let opened_together = if transport_type.opens_concurrently() {
+                remaining.len()
+            } else {
+                1
+            };
+            let mut opening: FuturesUnordered<_> = remaining[..opened_together]
+                .iter()
+                .map(|&addr| self.open_at(addr, transport_type.clone(), host, given_tls))
+                .collect();
+            let mut first_opened = None;
+            while let Some((addr, opened)) = opening.next().await {
+                remaining.retain(|&waiting| waiting != addr);
+                match opened {
+                    Ok(connected) => {
+                        first_opened = Some(connected);
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to connect to {}: {}", addr, e);
+                        last_error = Some(e);
+                    }
                 }
+            }
+            drop(opening);
+            let Some(connected) = first_opened else {
+                continue;
             };
 
             let mut inner = self.inner.write().await;
