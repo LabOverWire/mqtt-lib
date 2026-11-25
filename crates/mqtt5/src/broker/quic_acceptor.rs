@@ -129,7 +129,7 @@ impl QuicAcceptorConfig {
     /// # Errors
     /// Returns an error if certificate loading fails or TLS configuration is invalid.
     pub fn build_server_config(&self) -> Result<ServerConfig> {
-        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+        let crypto_provider = crate::crypto::ring_provider();
 
         let mut tls_config = if let Some(ref client_ca_certs) = self.client_ca_certs {
             let mut root_store = RootCertStore::empty();
@@ -139,7 +139,10 @@ impl QuicAcceptorConfig {
                 })?;
             }
 
-            let verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+            let verifier_builder = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(root_store),
+                Arc::clone(&crypto_provider),
+            );
 
             let client_verifier = if self.require_client_cert {
                 verifier_builder.build()

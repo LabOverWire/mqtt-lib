@@ -154,7 +154,7 @@ impl QuicConfig {
     }
 
     fn build_client_config(&self) -> Result<ClientConfig> {
-        let crypto_provider = Arc::new(rustls::crypto::ring::default_provider());
+        let crypto_provider = crate::crypto::ring_provider();
 
         let mut crypto = if self.verify_server_cert {
             let mut root_store = RootCertStore::empty();

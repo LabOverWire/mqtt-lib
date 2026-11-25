@@ -108,7 +108,14 @@ impl TlsAcceptorConfig {
     ///
     /// Returns an error if the configuration is invalid
     pub fn build_server_config(&self) -> Result<ServerConfig> {
-        let mut config = if let Some(ref client_ca_certs) = self.client_ca_certs {
+        let provider = crate::crypto::ring_provider();
+        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| {
+                MqttError::Configuration(format!("Failed to set protocol versions: {e}"))
+            })?;
+
+        let builder = if let Some(ref client_ca_certs) = self.client_ca_certs {
             let mut root_store = RootCertStore::empty();
             for cert in client_ca_certs {
                 root_store.add(cert.clone()).map_err(|e| {
@@ -116,7 +123,8 @@ impl TlsAcceptorConfig {
                 })?;
             }
 
-            let verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+            let verifier_builder =
+                WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), provider);
 
             let client_verifier = if self.require_client_cert {
                 verifier_builder.build()
@@ -127,22 +135,17 @@ impl TlsAcceptorConfig {
                 MqttError::Configuration(format!("Failed to build client verifier: {e}"))
             })?;
 
-            ServerConfig::builder()
-                .with_client_cert_verifier(client_verifier)
-                .with_single_cert(self.cert_chain.clone(), self.private_key.clone_key())
-                .map_err(|e| {
-                    MqttError::Configuration(format!("Failed to configure server cert: {e}"))
-                })?
+            builder.with_client_cert_verifier(client_verifier)
         } else {
-            ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(self.cert_chain.clone(), self.private_key.clone_key())
-                .map_err(|e| {
-                    MqttError::Configuration(format!("Failed to configure server cert: {e}"))
-                })?
+            builder.with_no_client_auth()
         };
 
-        // Set ALPN protocols
+        let mut config = builder
+            .with_single_cert(self.cert_chain.clone(), self.private_key.clone_key())
+            .map_err(|e| {
+                MqttError::Configuration(format!("Failed to configure server cert: {e}"))
+            })?;
+
         config.alpn_protocols.clone_from(&self.alpn_protocols);
 
         Ok(config)

@@ -304,7 +304,9 @@ async fn fetch_jwks_http(uri: &str, timeout: Duration) -> Result<Vec<JwkKey>, Jw
     let mut root_store = rustls::RootCertStore::empty();
     root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-    let tls_config = rustls::ClientConfig::builder()
+    let tls_config = rustls::ClientConfig::builder_with_provider(crate::crypto::ring_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| JwksError::TlsError(e.to_string()))?
         .with_root_certificates(root_store)
         .with_no_client_auth();
 
