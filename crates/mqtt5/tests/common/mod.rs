@@ -5,8 +5,7 @@ pub mod cli_helpers;
 use mqtt5::time::Duration;
 use mqtt5::{MessageProperties, MqttClient, QoS};
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
 use ulid::Ulid;
 
 #[allow(dead_code)]
@@ -383,7 +382,7 @@ pub async fn create_test_client_with_broker(name: &str, broker_addr: &str) -> Mq
 /// Message collector for testing subscriptions
 #[derive(Clone)]
 pub struct MessageCollector {
-    messages: Arc<RwLock<Vec<ReceivedMessage>>>,
+    messages: Arc<Mutex<Vec<ReceivedMessage>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -400,7 +399,7 @@ pub struct ReceivedMessage {
 impl MessageCollector {
     pub fn new() -> Self {
         Self {
-            messages: Arc::new(RwLock::new(Vec::new())),
+            messages: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -408,28 +407,21 @@ impl MessageCollector {
     pub fn callback(&self) -> impl Fn(mqtt5::types::Message) + Send + Sync + 'static {
         let messages = self.messages.clone();
         move |msg| {
-            let received = ReceivedMessage {
-                topic: msg.topic.clone(),
-                payload: msg.payload.clone(),
+            messages.lock().unwrap().push(ReceivedMessage {
+                topic: msg.topic,
+                payload: msg.payload,
                 qos: msg.qos,
                 retain: msg.retain,
-                properties: msg.properties.clone(),
-            };
-
-            // Use spawn to avoid blocking the callback
-            let messages = messages.clone();
-            tokio::spawn(async move {
-                messages.write().await.push(received);
+                properties: msg.properties,
             });
         }
     }
 
     /// Wait for a specific number of messages
-    #[allow(dead_code)]
     pub async fn wait_for_messages(&self, count: usize, timeout: Duration) -> bool {
         let start = tokio::time::Instant::now();
         while start.elapsed() < timeout {
-            if self.messages.read().await.len() >= count {
+            if self.count() >= count {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -438,43 +430,43 @@ impl MessageCollector {
     }
 
     /// Get all received messages
-    pub async fn get_messages(&self) -> Vec<ReceivedMessage> {
-        self.messages.read().await.clone()
+    pub fn get_messages(&self) -> Vec<ReceivedMessage> {
+        self.messages.lock().unwrap().clone()
     }
 
     /// Clear all messages
-    #[allow(dead_code)]
-    pub async fn clear(&self) {
-        self.messages.write().await.clear();
+    pub fn clear(&self) {
+        self.messages.lock().unwrap().clear();
     }
 
     /// Get message count
-    pub async fn count(&self) -> usize {
-        self.messages.read().await.len()
+    pub fn count(&self) -> usize {
+        self.messages.lock().unwrap().len()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #[tokio::test]
-    async fn test_message_collector() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_collector_holds_each_message_in_callback_order_once_the_callback_returns() {
         let collector = super::MessageCollector::new();
-
         let callback = collector.callback();
-        let message = mqtt5::types::Message {
-            topic: "test/topic".to_string(),
-            payload: b"test".to_vec(),
-            qos: mqtt5::QoS::AtMostOnce,
-            retain: false,
-            properties: mqtt5::MessageProperties::default(),
-            stream_id: None,
-        };
-        callback(message);
-
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        assert_eq!(collector.count().await, 1);
-        let messages = collector.get_messages().await;
-        assert_eq!(messages[0].topic, "test/topic");
+        let topics: Vec<String> = (0..2000).map(|index| format!("test/{index}")).collect();
+        for topic in &topics {
+            callback(mqtt5::types::Message {
+                topic: topic.clone(),
+                payload: b"test".to_vec(),
+                qos: mqtt5::QoS::AtMostOnce,
+                retain: false,
+                properties: mqtt5::MessageProperties::default(),
+                stream_id: None,
+            });
+        }
+        let collected: Vec<String> = collector
+            .get_messages()
+            .into_iter()
+            .map(|message| message.topic)
+            .collect();
+        assert_eq!(collected, topics);
     }
 }

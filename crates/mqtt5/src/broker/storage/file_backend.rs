@@ -653,13 +653,19 @@ impl FileBackend {
         );
     }
 
-    /// List all files in directory with extension
     async fn list_files(&self, dir: &Path, extension: &str) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
 
-        let mut entries = fs::read_dir(dir).await.map_err(|e| {
-            MqttError::Io(format!("Failed to read directory {}: {}", dir.display(), e))
-        })?;
+        let mut entries = match fs::read_dir(dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+            Err(e) => {
+                return Err(MqttError::Io(format!(
+                    "Failed to read directory {}: {e}",
+                    dir.display()
+                )))
+            }
+        };
 
         while let Some(entry) = entries
             .next_entry()
@@ -900,10 +906,6 @@ impl StorageBackend for FileBackend {
     async fn get_inflight_messages(&self, client_id: &str) -> Result<Vec<InflightMessage>> {
         self.flush_queue_writes().await;
         let client_dir = self.inflight_dir.join(client_id);
-        if !client_dir.exists() {
-            return Ok(Vec::new());
-        }
-
         let files = self.list_files(&client_dir, "json").await?;
         let mut messages = Vec::new();
 
@@ -976,7 +978,7 @@ impl StorageBackend for FileBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::storage::RetainedMessage;
+    use crate::broker::storage::{InflightPhase, RetainedMessage};
     use crate::packet::publish::PublishPacket;
     use crate::QoS;
 
@@ -1290,5 +1292,42 @@ mod tests {
         )));
         let error = lock_outcome(attempt).unwrap_err();
         assert!(error.to_string().contains("Failed to lock"), "{error}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cleanup_survives_inflight_directories_removed_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FileBackend::new(dir.path()).await.unwrap());
+        let clients: Vec<String> = (0..64).map(|index| format!("gone-{index}")).collect();
+        for _ in 0..50 {
+            for client_id in &clients {
+                let publish = PublishPacket::new("t".to_string(), b"x".to_vec(), QoS::ExactlyOnce)
+                    .with_packet_id(1);
+                backend
+                    .store_inflight_message(InflightMessage::from_publish(
+                        &publish,
+                        client_id.clone(),
+                        InflightDirection::Outbound,
+                        InflightPhase::AwaitingPubrec,
+                    ))
+                    .await
+                    .unwrap();
+            }
+            backend.flush_queue_writes().await;
+            let remover = Arc::clone(&backend);
+            let client_ids = clients.clone();
+            let removal = tokio::spawn(async move {
+                for client_id in &client_ids {
+                    remover
+                        .remove_all_inflight_messages(client_id)
+                        .await
+                        .unwrap();
+                    remover.flush_queue_writes().await;
+                }
+            });
+            let cleaned = backend.cleanup_expired().await;
+            removal.await.unwrap();
+            assert!(cleaned.is_ok(), "{cleaned:?}");
+        }
     }
 }
