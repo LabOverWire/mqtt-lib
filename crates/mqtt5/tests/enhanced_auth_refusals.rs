@@ -20,7 +20,18 @@ use tokio::net::TcpStream;
 
 const METHOD: &str = "SCRAM-SHA-256";
 const USERNAME: &str = "alice";
-const PASSWORD: &str = "wonderland";
+fn run_nonce() -> u128 {
+    static NONCE: std::sync::OnceLock<u128> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(u128::from(std::process::id()), |elapsed| elapsed.as_nanos())
+    })
+}
+
+fn password() -> String {
+    format!("{:x}", run_nonce())
+}
 const EMPTY_AUTH: [u8; 2] = [0xF0, 0x00];
 
 struct SingleUserStore {
@@ -94,8 +105,8 @@ async fn start_broker(scram: bool) -> (SocketAddr, tokio::task::JoinHandle<()>) 
     let mut broker = if scram {
         let store = SingleUserStore {
             credentials: ScramCredentials::from_password_and_salt(
-                PASSWORD,
-                b"0123456789abcdef",
+                &password(),
+                &run_nonce().to_be_bytes(),
                 4096,
             ),
         };
@@ -240,7 +251,7 @@ fn assert_only_connack(packets: &[Packet], expected: ReasonCode, rule: &str) {
 #[tokio::test]
 async fn scram_reauthentication_restarted_before_it_completes_starts_a_new_exchange() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let mut wire = connect_scram(addr, "scram-restart", &handler).await;
     let abandoned = handler.initial_response(METHOD).await.unwrap();
     wire.send(&AuthPacket::re_authenticate(METHOD.to_string(), abandoned).unwrap())
@@ -249,9 +260,9 @@ async fn scram_reauthentication_restarted_before_it_completes_starts_a_new_excha
         Some(Packet::Auth(auth)) if auth.reason_code == ReasonCode::ContinueAuthentication => {}
         other => panic!("setup: expected AUTH 0x18 with server-first, got {other:?}"),
     }
-    let restarted = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let restarted = ScramSha256AuthHandler::new(USERNAME, password());
     let reply = reauthenticate(&mut wire, &restarted).await;
-    let second = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let second = ScramSha256AuthHandler::new(USERNAME, password());
     let after = reauthenticate(&mut wire, &second).await;
     broker.abort();
     assert_reauthentication_succeeded("[MQTT-4.12.1-1] restarted", reply, &restarted).await;
@@ -261,7 +272,7 @@ async fn scram_reauthentication_restarted_before_it_completes_starts_a_new_excha
 #[tokio::test]
 async fn scram_reauthentication_twice_succeeds() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let mut wire = connect_scram(addr, "scram-twice", &handler).await;
     let first = reauthenticate(&mut wire, &handler).await;
     assert_reauthentication_succeeded("first", first, &handler).await;
@@ -315,7 +326,7 @@ async fn duplicate_connect_is_answered_with_disconnect_protocol_error() {
 #[tokio::test]
 async fn auth_without_method_after_scram_connack_is_answered_with_disconnect_protocol_error() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let mut wire = connect_scram(addr, "scram-empty-auth", &handler).await;
     wire.send_raw(&EMPTY_AUTH).await;
     let packets = wire.packets_until_closed().await;
@@ -330,7 +341,7 @@ async fn auth_without_method_after_scram_connack_is_answered_with_disconnect_pro
 #[tokio::test]
 async fn reauthenticate_before_connack_is_refused_with_connack_protocol_error() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let (mut wire, _) = send_scram_connect(addr, "scram-early-reauth", &handler).await;
     wire.send(&AuthPacket::re_authenticate(METHOD.to_string(), None).unwrap())
         .await;
@@ -346,7 +357,7 @@ async fn reauthenticate_before_connack_is_refused_with_connack_protocol_error() 
 #[tokio::test]
 async fn success_auth_before_connack_is_refused_with_connack_protocol_error() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let (mut wire, _) = send_scram_connect(addr, "scram-early-success", &handler).await;
     wire.send(&AuthPacket::success(METHOD.to_string()).unwrap())
         .await;
@@ -362,7 +373,7 @@ async fn success_auth_before_connack_is_refused_with_connack_protocol_error() {
 #[tokio::test]
 async fn other_method_before_connack_is_refused_with_connack_bad_authentication_method() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let (mut wire, _) = send_scram_connect(addr, "scram-early-method", &handler).await;
     wire.send(&AuthPacket::continue_authentication("OTHER".to_string(), None).unwrap())
         .await;
@@ -378,7 +389,7 @@ async fn other_method_before_connack_is_refused_with_connack_bad_authentication_
 #[tokio::test]
 async fn other_method_after_scram_connack_is_answered_with_disconnect_protocol_error() {
     let (addr, broker) = start_broker(true).await;
-    let handler = ScramSha256AuthHandler::new(USERNAME, PASSWORD);
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
     let mut wire = connect_scram(addr, "scram-late-method", &handler).await;
     wire.send(&AuthPacket::re_authenticate("OTHER".to_string(), None).unwrap())
         .await;
