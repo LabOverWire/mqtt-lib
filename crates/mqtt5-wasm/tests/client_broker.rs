@@ -99,3 +99,84 @@ async fn wasm_client_against_wasm_broker() {
     publisher.disconnect().await.unwrap();
     subscriber.disconnect().await.unwrap();
 }
+
+fn counting_callback(counter: &Rc<RefCell<u32>>) -> js_sys::Function {
+    let sink = Rc::clone(counter);
+    Closure::<dyn FnMut(JsValue, JsValue, JsValue)>::new(
+        move |_: JsValue, _: JsValue, _: JsValue| {
+            *sink.borrow_mut() += 1;
+        },
+    )
+    .into_js_value()
+    .unchecked_into()
+}
+
+async fn shared_and_plain_counts(unsubscribe: Option<&str>) -> (u32, u32) {
+    let mut config = WasmBrokerConfig::new();
+    config.set_allow_anonymous(true);
+    let broker = WasmBroker::with_config(config).unwrap();
+
+    let subscriber = WasmMqttClient::new("shared-and-plain".to_string());
+    subscriber
+        .connect_message_port_with_options(
+            broker.create_client_port().unwrap(),
+            &WasmConnectOptions::new(),
+        )
+        .await
+        .unwrap();
+    let shared = Rc::new(RefCell::new(0u32));
+    let plain = Rc::new(RefCell::new(0u32));
+    subscriber
+        .subscribe_with_callback("$share/g/a/b", counting_callback(&shared))
+        .await
+        .unwrap();
+    subscriber
+        .subscribe_with_callback("a/b", counting_callback(&plain))
+        .await
+        .unwrap();
+    if let Some(filter) = unsubscribe {
+        subscriber.unsubscribe(filter).await.unwrap();
+        sleep(50).await;
+    }
+
+    let publisher = WasmMqttClient::new("shared-and-plain-pub".to_string());
+    publisher
+        .connect_message_port_with_options(
+            broker.create_client_port().unwrap(),
+            &WasmConnectOptions::new(),
+        )
+        .await
+        .unwrap();
+    publisher
+        .publish_with_options("a/b", b"x", &publish_options(1))
+        .await
+        .unwrap();
+    let expected = if unsubscribe.is_some() { 1 } else { 2 };
+    for _ in 0..100 {
+        if *shared.borrow() + *plain.borrow() >= expected {
+            break;
+        }
+        sleep(10).await;
+    }
+    sleep(50).await;
+    publisher.disconnect().await.unwrap();
+    subscriber.disconnect().await.unwrap();
+    let counts = (*shared.borrow(), *plain.borrow());
+    counts
+}
+
+#[wasm_bindgen_test]
+async fn shared_and_plain_callbacks_for_one_filter_both_receive() {
+    let (shared, plain) = shared_and_plain_counts(None).await;
+    assert!(shared > 0 && plain > 0, "shared {shared} plain {plain}");
+}
+
+#[wasm_bindgen_test]
+async fn unsubscribing_a_filter_keeps_the_shared_callback_for_it() {
+    assert_eq!(shared_and_plain_counts(Some("a/b")).await, (1, 0));
+}
+
+#[wasm_bindgen_test]
+async fn unsubscribing_a_shared_filter_keeps_the_plain_callback_for_it() {
+    assert_eq!(shared_and_plain_counts(Some("$share/g/a/b")).await, (0, 1));
+}
