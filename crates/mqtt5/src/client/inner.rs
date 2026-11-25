@@ -767,7 +767,7 @@ impl MqttClient {
                     }
                     Err(e) => {
                         tracing::debug!("Failed to connect to {}: {}", addr, e);
-                        last_error = Some(e);
+                        last_error = Some(Self::worse_connect_error(last_error, e));
                     }
                 }
             }
@@ -814,7 +814,7 @@ impl MqttClient {
                 }
                 Err(e) => {
                     drop(inner);
-                    last_error = Some(e);
+                    last_error = Some(Self::worse_connect_error(last_error, e));
                 }
             }
         }
@@ -1099,6 +1099,13 @@ impl MqttClient {
         tokio::spawn(async move {
             client.monitor_connection(connect).await;
         });
+    }
+
+    fn worse_connect_error(earlier: Option<MqttError>, later: MqttError) -> MqttError {
+        match earlier {
+            Some(refusal) if Self::refused_for_good(&refusal) => refusal,
+            _ => later,
+        }
     }
 
     /// Whether another attempt can't help: the server refused this client or its credentials,
