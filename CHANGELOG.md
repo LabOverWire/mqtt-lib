@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
+
 ## [mqtt5 0.51.0] - 2026-11-26
 
 ### Breaking
