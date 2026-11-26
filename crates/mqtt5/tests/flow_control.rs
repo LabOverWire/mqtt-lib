@@ -13,17 +13,17 @@ async fn test_flow_control_basic_functionality() {
 
     // Acquire first quota
     fc.acquire_send_quota(1).await.unwrap();
-    assert_eq!(fc.in_flight_count().await, 1);
+    assert_eq!(fc.in_flight_count(), 1);
     assert_eq!(fc.available_permits(), 1);
 
     // Acquire second quota
     fc.acquire_send_quota(2).await.unwrap();
-    assert_eq!(fc.in_flight_count().await, 2);
+    assert_eq!(fc.in_flight_count(), 2);
     assert_eq!(fc.available_permits(), 0);
     assert!(!fc.can_send());
 
     // Third attempt should fail immediately
-    let result = fc.try_acquire_send_quota(3).await;
+    let result = fc.try_acquire_send_quota(3);
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -41,8 +41,8 @@ async fn test_flow_control_acknowledgment() {
     assert!(!fc.can_send());
 
     // Acknowledge one message
-    fc.acknowledge(1).await.unwrap();
-    assert_eq!(fc.in_flight_count().await, 1);
+    fc.acknowledge(1).unwrap();
+    assert_eq!(fc.in_flight_count(), 1);
     assert_eq!(fc.available_permits(), 1);
     assert!(fc.can_send());
 
@@ -51,7 +51,7 @@ async fn test_flow_control_acknowledgment() {
     assert!(!fc.can_send());
 
     // Acknowledge non-existent packet should return error
-    let result = fc.acknowledge(999).await;
+    let result = fc.acknowledge(999);
     assert!(result.is_err());
     assert!(matches!(
         result.unwrap_err(),
@@ -73,7 +73,7 @@ async fn test_flow_control_unlimited() {
 
     // Still unlimited
     assert!(fc.can_send());
-    assert_eq!(fc.in_flight_count().await, 0); // Not tracked when unlimited
+    assert_eq!(fc.in_flight_count(), 0); // Not tracked when unlimited
 }
 
 #[tokio::test]
@@ -123,7 +123,7 @@ async fn test_flow_control_backpressure_release() {
     let fc_clone = fc.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        fc_clone.acknowledge(1).await.unwrap();
+        fc_clone.acknowledge(1).unwrap();
     });
 
     // This should succeed after the quota is released
@@ -145,17 +145,17 @@ async fn test_flow_control_receive_maximum_adjustment() {
     assert!(!fc.can_send());
 
     // Increase receive maximum
-    fc.set_receive_maximum(3).await;
+    fc.set_receive_maximum(3);
     assert!(fc.can_send());
     assert_eq!(fc.available_permits(), 1);
 
     // Decrease receive maximum
-    fc.set_receive_maximum(1).await;
+    fc.set_receive_maximum(1);
     assert!(!fc.can_send());
     assert_eq!(fc.available_permits(), 0);
 
     // Set to unlimited
-    fc.set_receive_maximum(0).await;
+    fc.set_receive_maximum(0);
     assert!(fc.can_send());
 }
 
@@ -181,7 +181,7 @@ async fn test_flow_control_expired_cleanup() {
     fc.acquire_send_quota(3).await.unwrap();
 
     // Clean up expired messages
-    let expired = fc.cleanup_expired().await;
+    let expired = fc.cleanup_expired();
 
     // Should have cleaned up the first two
     assert_eq!(expired.len(), 2);
@@ -190,7 +190,7 @@ async fn test_flow_control_expired_cleanup() {
     assert!(!expired.contains(&3));
 
     // Should have more available quota now
-    assert_eq!(fc.in_flight_count().await, 1);
+    assert_eq!(fc.in_flight_count(), 1);
     assert_eq!(fc.available_permits(), 2);
 }
 
@@ -219,11 +219,11 @@ async fn test_flow_control_clear() {
     // Register some messages
     fc.acquire_send_quota(1).await.unwrap();
     fc.acquire_send_quota(2).await.unwrap();
-    assert_eq!(fc.in_flight_count().await, 2);
+    assert_eq!(fc.in_flight_count(), 2);
 
     // Clear all
     fc.clear().await;
-    assert_eq!(fc.in_flight_count().await, 0);
+    assert_eq!(fc.in_flight_count(), 0);
 
     // Should still respect receive maximum
     assert_eq!(fc.available_permits(), 1); // 2 permits were consumed and not released
@@ -238,7 +238,7 @@ async fn test_flow_control_concurrent_access() {
     let mut handles = Vec::new();
     for i in 1..=20 {
         let fc_clone = fc.clone();
-        let handle = tokio::spawn(async move { fc_clone.try_acquire_send_quota(i).await });
+        let handle = tokio::spawn(async move { fc_clone.try_acquire_send_quota(i) });
         handles.push(handle);
     }
 
@@ -256,7 +256,7 @@ async fn test_flow_control_concurrent_access() {
     // Should have exactly 10 successes (the receive maximum) and 10 failures
     assert_eq!(successes, 10);
     assert_eq!(failures, 10);
-    assert_eq!(fc.in_flight_count().await, 10);
+    assert_eq!(fc.in_flight_count(), 10);
     assert_eq!(fc.available_permits(), 0);
 }
 
@@ -265,15 +265,15 @@ async fn test_flow_control_legacy_register_send() {
     let fc = FlowControlManager::new(2);
 
     // Test legacy register_send method
-    fc.register_send(1).await.unwrap();
-    fc.register_send(2).await.unwrap();
+    fc.register_send(1).unwrap();
+    fc.register_send(2).unwrap();
 
     // Should be at capacity
     assert!(!fc.can_send());
-    assert_eq!(fc.in_flight_count().await, 2);
+    assert_eq!(fc.in_flight_count(), 2);
 
     // Third attempt should fail
-    let result = fc.register_send(3).await;
+    let result = fc.register_send(3);
     assert!(result.is_err());
 }
 
@@ -306,7 +306,7 @@ async fn test_flow_control_edge_cases() {
     assert!(!fc.can_send());
 
     // Acknowledge and immediately try to acquire again
-    fc.acknowledge(1).await.unwrap();
+    fc.acknowledge(1).unwrap();
     assert!(fc.can_send());
     fc.acquire_send_quota(2).await.unwrap();
     assert!(!fc.can_send());
@@ -314,7 +314,7 @@ async fn test_flow_control_edge_cases() {
     // Test maximum packet ID
     let fc = FlowControlManager::new(1);
     fc.acquire_send_quota(u16::MAX).await.unwrap();
-    fc.acknowledge(u16::MAX).await.unwrap();
+    fc.acknowledge(u16::MAX).unwrap();
 
     // Should work fine with maximum packet ID
     assert!(fc.can_send());
@@ -333,13 +333,13 @@ async fn test_flow_control_get_expired() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Check what's expired with 100ms timeout (all should be expired)
-    let expired = fc.get_expired(Duration::from_millis(100)).await;
+    let expired = fc.get_expired(Duration::from_millis(100));
     assert_eq!(expired.len(), 3);
     assert!(expired.contains(&1));
     assert!(expired.contains(&2));
     assert!(expired.contains(&3));
 
     // Check what's expired with very long timeout (nothing should be expired yet)
-    let expired = fc.get_expired(Duration::from_secs(10)).await;
+    let expired = fc.get_expired(Duration::from_secs(10));
     assert_eq!(expired.len(), 0);
 }
