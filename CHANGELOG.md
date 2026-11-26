@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **An empty client identifier in the options of `connect_with_options` or `connect_with_tls_and_options` asks the server to assign one** (see Fixed, #301). Before, the options' identifier was ignored, so a client that had been assigned an identifier sent it again and resumed that session. To resume it now, pass `client_id()` in the options.
 - **`WasmBroker::add_user` takes the password as `&str`.** A Rust caller that passes a `String` borrows it instead. The JavaScript `addUser` is unchanged.
 - **`BridgeConfig` gains the public field `outbound_queue_capacity`** (see Fixed). A struct literal that names every field no longer compiles; add the field or start from `BridgeConfig::new`. Configuration files that leave it out get the default of 1000.
 - **`RoutableMessage`, `QueuedMessage` and `InflightMessage` gain the public field `received_at_ms`** (see Fixed, #325). A struct literal that names every field no longer compiles: give it the time the broker received the message, in Unix milliseconds (`mqtt5::broker::storage::unix_millis_now()` for a message received now). `QueuedMessage::remaining_expiry_interval` and `InflightMessage::remaining_expiry_interval` return `Some(0)` once the interval has passed instead of `None`, and `QueuedMessage::to_publish_packet` then carries a Message Expiry Interval of 0 instead of none.
