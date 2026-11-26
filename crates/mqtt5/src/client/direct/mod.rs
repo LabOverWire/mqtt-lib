@@ -277,12 +277,12 @@ impl SubscribeSent {
     pub(crate) async fn acknowledged(self) -> Result<Vec<(u16, QoS)>> {
         let Self {
             written,
-            suback,
+            mut suback,
             packet,
             undo,
             session,
         } = self;
-        let suback = acknowledgement(written, suback).await?;
+        let suback = acknowledgement(written, &mut suback).await?;
         if suback.reason_codes.is_empty() {
             return Err(MqttError::ProtocolError(
                 "No results returned for subscription".to_string(),
@@ -319,24 +319,48 @@ impl SubscribeSent {
     }
 }
 
+type SharedUnsubacks = Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>;
+
+struct UnsubackWait {
+    receiver: oneshot::Receiver<UnsubAckPacket>,
+    pending: SharedUnsubacks,
+    packet_id: u16,
+}
+
+impl Drop for UnsubackWait {
+    fn drop(&mut self) {
+        self.receiver.close();
+        let mut pending = self.pending.lock();
+        if pending
+            .get(&self.packet_id)
+            .is_some_and(oneshot::Sender::is_closed)
+        {
+            pending.remove(&self.packet_id);
+        }
+    }
+}
+
 pub(crate) struct UnsubscribeSent {
     written: PendingFlush,
-    unsuback: oneshot::Receiver<UnsubAckPacket>,
+    unsuback: UnsubackWait,
     packet: UnsubscribePacket,
-    pending_unsubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
     session: Arc<tokio::sync::RwLock<SessionState>>,
 }
 
 impl UnsubscribeSent {
     pub(crate) async fn acknowledged(self) -> Result<()> {
-        let packet_id = self.packet.packet_id;
-        let acknowledged = acknowledgement(self.written, self.unsuback).await;
-        if acknowledged.is_err() {
-            self.pending_unsubacks.lock().remove(&packet_id);
-        }
+        let Self {
+            written,
+            mut unsuback,
+            packet,
+            session,
+        } = self;
+        let packet_id = packet.packet_id;
+        let acknowledged = acknowledgement(written, &mut unsuback.receiver).await;
+        drop(unsuback);
 
-        for filter in &self.packet.filters {
-            let removed = self.session.write().await.remove_subscription(filter).await;
+        for filter in &packet.filters {
+            let removed = session.write().await.remove_subscription(filter).await;
             if let Err(e) = removed {
                 tracing::warn!(filter = %filter, error = %e, "subscription not removed from session");
             }
@@ -354,7 +378,7 @@ impl UnsubscribeSent {
     }
 }
 
-async fn acknowledgement<T>(written: PendingFlush, ack: oneshot::Receiver<T>) -> Result<T> {
+async fn acknowledgement<T>(written: PendingFlush, ack: &mut oneshot::Receiver<T>) -> Result<T> {
     if written.await.is_err() {
         return Err(MqttError::OutcomeUnknown);
     }
@@ -2098,8 +2122,13 @@ impl DirectClientInner {
         let mut packet = packet;
         packet.packet_id = reservation.packet_id();
 
-        let (tx, rx) = oneshot::channel();
+        let (tx, receiver) = oneshot::channel();
         self.pending_unsubacks.lock().insert(packet.packet_id, tx);
+        let unsuback = UnsubackWait {
+            receiver,
+            pending: Arc::clone(&self.pending_unsubacks),
+            packet_id: packet.packet_id,
+        };
         drop(reservation);
 
         let committed = target.commit_then(&Packet::Unsubscribe(packet.clone()), || {
@@ -2114,19 +2143,12 @@ impl DirectClientInner {
                 let _ = self.ack_callbacks.unregister(topic);
             }
         });
-        let written = match committed {
-            Ok(written) => written,
-            Err(e) => {
-                self.pending_unsubacks.lock().remove(&packet.packet_id);
-                return Err(e);
-            }
-        };
+        let written = committed?;
 
         Ok(UnsubscribeSent {
             written,
-            unsuback: rx,
+            unsuback,
             packet,
-            pending_unsubacks: Arc::clone(&self.pending_unsubacks),
             session: Arc::clone(&self.session),
         })
     }
@@ -3881,6 +3903,89 @@ pub mod tests {
                 .ok()
                 .map(|r| r.packet_id()),
             Some(1)
+        );
+    }
+
+    fn unsubscribe_packet(topic: &str) -> UnsubscribePacket {
+        UnsubscribePacket {
+            packet_id: 0,
+            properties: Properties::default(),
+            filters: vec![topic.to_string()],
+            protocol_version: 5,
+        }
+    }
+
+    async fn client_on_unanswering_server(name: &str) -> DirectClientInner {
+        let (addr, _) = silent_broker(vec![vec![0x20, 0x03, 0x00, 0x00, 0x00]]).await;
+        let mut client = DirectClientInner::new(ConnectOptions::new(name));
+        connect_to(&mut client, addr).await;
+        client
+    }
+
+    #[tokio::test]
+    async fn cancelled_unsubscribe_releases_its_packet_id() {
+        let client = client_on_unanswering_server("cancelled-unsubscribe").await;
+        let sent = client
+            .send_unsubscribe(unsubscribe_packet("t/cancelled"))
+            .await
+            .unwrap();
+        let packet_id = sent.packet.packet_id;
+
+        let waited = tokio::time::timeout(Duration::from_millis(20), sent.acknowledged()).await;
+
+        assert!(waited.is_err());
+        assert!(
+            !client.pending_unsubacks.lock().contains_key(&packet_id),
+            "cancelled unsubscribe still holds packet id {packet_id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_unsubscribe_keeps_the_entry_of_a_reused_packet_id() {
+        let client = client_on_unanswering_server("reused-unsubscribe-id").await;
+        let sent = client
+            .send_unsubscribe(unsubscribe_packet("t/first"))
+            .await
+            .unwrap();
+        let packet_id = sent.packet.packet_id;
+        let (reuser, reuser_waiting) = oneshot::channel();
+        drop(client.pending_unsubacks.lock().insert(packet_id, reuser));
+
+        let outcome = sent.acknowledged().await;
+
+        assert!(matches!(outcome, Err(MqttError::OutcomeUnknown)));
+        assert!(
+            client.pending_unsubacks.lock().contains_key(&packet_id),
+            "finished unsubscribe removed the entry of packet id {packet_id} owned by another"
+        );
+        drop(reuser_waiting);
+    }
+
+    #[tokio::test]
+    async fn cancelled_subscribe_releases_its_packet_id() {
+        let client = client_on_unanswering_server("cancelled-subscribe").await;
+        let packet = SubscribePacket {
+            packet_id: 0,
+            properties: Properties::default(),
+            filters: vec![TopicFilter::new("t/cancelled", QoS::AtLeastOnce)],
+            protocol_version: 5,
+        };
+        let sent = client
+            .send_subscribe(
+                packet,
+                SubscriptionCallback::Restored(0),
+                SubscriptionPersistence::Skip,
+            )
+            .await
+            .unwrap();
+        let packet_id = sent.packet.packet_id;
+
+        let waited = tokio::time::timeout(Duration::from_millis(20), sent.acknowledged()).await;
+
+        assert!(waited.is_err());
+        assert!(
+            !client.pending_subacks.lock().contains_key(&packet_id),
+            "cancelled subscribe still holds packet id {packet_id}"
         );
     }
 }
