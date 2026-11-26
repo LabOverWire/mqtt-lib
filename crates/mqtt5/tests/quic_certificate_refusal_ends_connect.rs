@@ -87,7 +87,7 @@ async fn control_the_trusted_certificate_connects_past_a_silent_address() {
 }
 
 #[tokio::test]
-async fn a_refused_certificate_ends_the_connect_without_waiting_for_a_silent_address() {
+async fn a_refused_certificate_ends_the_connect_after_the_grace_past_a_silent_address() {
     let broker = quic_broker_on_ipv4_only().await;
     let (outcome, elapsed) = connect_to_localhost(broker.port, other_ca()).await;
     broker.running.abort();
