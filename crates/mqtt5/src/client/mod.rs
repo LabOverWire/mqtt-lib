@@ -24,6 +24,8 @@ mod builders;
 mod connection;
 #[cfg(not(target_arch = "wasm32"))]
 mod direct;
+#[cfg(feature = "transport-quic")]
+pub(crate) use direct::{Flush, RoomReservation, UnifiedWriter};
 mod error_recovery;
 mod inner;
 pub mod mock;
@@ -134,7 +136,7 @@ use self::direct::{
 pub struct MqttClient {
     pub(crate) inner: Arc<RwLock<DirectClientInner>>,
     pub(crate) connected: Arc<std::sync::atomic::AtomicBool>,
-    pub(crate) disconnect_requests: direct::DisconnectRequests,
+    pub(crate) disconnect_requests: Arc<direct::DisconnectRequests>,
     pub(crate) connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
     pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
@@ -393,26 +395,43 @@ impl MqttClient {
 
     /// Disconnects from the MQTT broker
     ///
+    /// Once the client has started closing the connection, dropping the returned future
+    /// does not stop it: the disconnect finishes in the background and still fires
+    /// [`ConnectionEvent::Disconnected`]. Dropped before that,
+    /// it leaves the client connected.
+    ///
     /// # Errors
     ///
     /// Returns an error if the operation fails
     #[instrument(skip(self))]
     pub async fn disconnect(&self) -> Result<()> {
-        let request = self.disconnect_requests.request();
-        let mut inner = self.inner.write().await;
-        drop(request);
-        let client_id = inner.session.read().await.client_id().to_string();
+        let request = self.disconnect_requests.begin();
+        let client_id = self.client_id().await;
         tracing::info!(client_id = %client_id, "Initiating MQTT disconnect");
 
+        let mut inner = Arc::clone(&self.inner).write_owned().await;
+        drop(request);
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
         self.monitor_wakeup.notify_one();
-        match inner.disconnect().await {
+        let callbacks = Arc::clone(&self.connection_event_callbacks);
+        let disconnected = tokio::spawn(async move {
+            let disconnected = inner.disconnect().await;
+            if disconnected.is_ok() {
+                fire_connection_event(
+                    &callbacks,
+                    ConnectionEvent::Disconnected {
+                        reason: DisconnectReason::ClientInitiated,
+                    },
+                )
+                .await;
+            }
+            disconnected
+        })
+        .await
+        .unwrap_or_else(|e| Err(MqttError::ConnectionError(format!("disconnect task: {e}"))));
+        match disconnected {
             Ok(()) => {
                 tracing::info!(client_id = %client_id, "Successfully disconnected from MQTT broker");
-                self.trigger_connection_event(ConnectionEvent::Disconnected {
-                    reason: DisconnectReason::ClientInitiated,
-                })
-                .await;
                 Ok(())
             }
             Err(e) => {
@@ -462,6 +481,15 @@ impl MqttClient {
     /// publish is queued while disconnected, or when it was sent but the connection
     /// ended, the client disconnected or the acknowledgement did not arrive in time;
     /// await its handle for the eventual [`crate::PublishOutcome`].
+    ///
+    /// A publish waits before it is committed while 1 MiB or more is already waiting to
+    /// be written on its connection or stream, and goes ahead, whatever its size, once
+    /// less than 1 MiB is pending. Over QUIC with
+    /// `StreamStrategy::DataPerTopic` or `StreamStrategy::DataPerSubscription`, a
+    /// publish to a topic that has no cached data stream waits while all cached streams
+    /// are still writing, and when the connection's flow control is exhausted it waits
+    /// until one of them drains, the connection closes or the client disconnects. Wrap
+    /// the call in a timeout if it must finish within a bound.
     ///
     /// # Errors
     ///
@@ -548,6 +576,15 @@ impl MqttClient {
     /// reconnect, a `QoS` 0 publish also waits until the client has written the messages
     /// it resends.
     ///
+    /// A publish waits before it is committed while 1 MiB or more is already waiting to
+    /// be written on its connection or stream, and goes ahead, whatever its size, once
+    /// less than 1 MiB is pending. Over QUIC with
+    /// `StreamStrategy::DataPerTopic` or `StreamStrategy::DataPerSubscription`, a
+    /// publish to a topic that has no cached data stream waits while all cached streams
+    /// are still writing, and when the connection's flow control is exhausted it waits
+    /// until one of them drains, the connection closes or the client disconnects. Wrap
+    /// the call in a timeout if it must finish within a bound.
+    ///
     /// # Errors
     ///
     /// Returns an error when the publish is definitely not sent: invalid topic or
@@ -596,11 +633,19 @@ impl MqttClient {
             match transmitted {
                 Transmitted::Written(written) => return Ok(written),
                 Transmitted::Restaged(next) => ready = next,
+                Transmitted::Flushing(flushing, delivery) => {
+                    flushing.await?;
+                    return Ok(Written::Sent(delivery));
+                }
             }
         }
     }
 
     /// Subscribes to a topic with a callback
+    ///
+    /// Like a publish, the call waits while 1 MiB or more is waiting to be written on its
+    /// connection or topic stream. See [`Self::subscribe_with_options`] for what each outcome
+    /// means.
     ///
     /// # Errors
     ///
@@ -621,9 +666,34 @@ impl MqttClient {
 
     /// Subscribes to a topic with custom options and a callback
     ///
+    /// Over QUIC with `StreamStrategy::DataPerTopic` or
+    /// `StreamStrategy::DataPerSubscription`, a call for a topic filter that has no
+    /// cached data stream waits while all cached streams are still writing, and when the
+    /// connection's flow control is exhausted it waits until one of them drains, the
+    /// connection closes or the client disconnects. Like a publish, the call also waits
+    /// while 1 MiB or more is waiting to be written on its connection or topic stream. Wrap
+    /// the call in a timeout if it must finish within a bound.
+    ///
+    /// The call returns `Ok` only once the SUBACK grants the subscription, and the callback
+    /// stays registered only then. A call that fails or is cancelled, for example by a
+    /// timeout around it, keeps nothing locally: no callback and no subscription for a
+    /// reconnect to restore. If its SUBSCRIBE was already sent, the server may still hold the
+    /// subscription. Such a call leaves the callbacks of earlier subscriptions to the same
+    /// filter in place. The callback is registered when the SUBSCRIBE is committed to the
+    /// connection, before any SUBACK or retained message can arrive, so an `unsubscribe` of the
+    /// same filter that was committed earlier does not remove it. The call does not hold up
+    /// `disconnect` while it waits for the SUBACK.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails
+    /// Returns [`MqttError::NotConnected`] when the SUBSCRIBE was not sent, including when a
+    /// `disconnect` interrupts the call before the packet is committed to the connection.
+    /// Returns [`MqttError::OutcomeUnknown`] when the SUBSCRIBE was sent but the connection
+    /// closed before its SUBACK arrived: the server may or may not hold the subscription, and
+    /// the client keeps neither the callback nor the subscription for a reconnect to restore,
+    /// so subscribe again or unsubscribe to settle it. Returns [`MqttError::Timeout`] when no
+    /// SUBACK arrives within 10 seconds, [`MqttError::SubscriptionDenied`] when the server
+    /// refuses the subscription, and other errors for invalid filters or options.
     #[instrument(skip(self, topic_filter, options, callback), fields(qos = ?options.qos), level = "debug")]
     pub async fn subscribe_with_options<F>(
         &self,
@@ -678,6 +748,13 @@ impl MqttClient {
     /// Subscribes to a topic, delivering each inbound message with an
     /// [`AckToken`] the application resolves after durable processing.
     ///
+    /// Like a publish, the call waits while 1 MiB or more is waiting to be written on its
+    /// connection or topic stream, and its outcomes follow [`Self::subscribe_with_options`]:
+    /// a call that fails or is cancelled keeps no callback and nothing for a reconnect to
+    /// restore. A filter delivers to the callback of its newest call, so a call that fails or
+    /// is cancelled leaves delivery with the newest remaining one, and an `unsubscribe` of the
+    /// filter removes them all.
+    ///
     /// The acknowledgement (PUBACK/PUBREC) is withheld until the token is acked,
     /// applying Receive-Maximum backpressure. Requires connection-wide deferred ack
     /// (`ConnectOptions::with_deferred_ack(true)` plus a persistent session).
@@ -716,48 +793,36 @@ impl MqttClient {
         }
 
         let callback: crate::client::direct::ack::AckPublishCallback = Arc::new(callback);
-        let callback_id = inner.ack_callbacks.register(&topic_filter, callback);
+        let callback = crate::client::direct::SubscriptionCallback::Ack(
+            Arc::clone(&inner.ack_callbacks),
+            callback,
+        );
+        let stored_ack_subscriptions = Arc::clone(&inner.stored_ack_subscriptions);
 
         let packet = build_subscribe_packet(
             &topic_filter,
             &options,
             inner.options.protocol_version.as_u8(),
         );
-        let stored_options = packet.filters.first().map(|f| f.options);
 
-        match inner
-            .subscribe_with_callback_internal(
+        let sent = inner
+            .send_subscribe(
                 packet,
-                callback_id,
-                crate::client::direct::SubscriptionPersistence::Skip,
+                callback,
+                crate::client::direct::SubscriptionPersistence::PersistAck,
             )
-            .await
-        {
-            Ok(results) => {
-                if let Some(&(packet_id, qos)) = results.first() {
-                    if let Some(stored) = stored_options {
-                        let mut stored_subscriptions = inner.stored_ack_subscriptions.lock();
-                        stored_subscriptions.retain(|(topic, ..)| *topic != topic_filter);
-                        stored_subscriptions.push((
-                            topic_filter.clone(),
-                            stored,
-                            options.subscription_identifier,
-                            callback_id,
-                        ));
-                    }
-                    Ok((packet_id, qos))
-                } else {
-                    let _ = inner.ack_callbacks.unregister(&topic_filter);
-                    Err(MqttError::ProtocolError(
-                        "No results returned for subscription".to_string(),
-                    ))
-                }
-            }
-            Err(e) => {
-                let _ = inner.ack_callbacks.unregister(&topic_filter);
-                Err(e)
-            }
-        }
+            .await;
+        drop(inner);
+        let sent = sent?;
+        let callback_id = sent.callback_id();
+        let results = sent.acknowledged().await?;
+        let &(packet_id, qos) = results.first().ok_or_else(|| {
+            MqttError::ProtocolError("No results returned for subscription".to_string())
+        })?;
+        stored_ack_subscriptions
+            .lock()
+            .retain(|(topic, .., id)| *topic != topic_filter || *id >= callback_id);
+        Ok((packet_id, qos))
     }
 
     /// Registers a deferred-ack callback for `topic_filter` without sending a SUBSCRIBE.
@@ -804,9 +869,10 @@ impl MqttClient {
 
         let inner = self.inner.read().await;
         let callback: PublishCallback = Arc::new(callback);
-        let callback_id = inner
-            .callback_manager
-            .register_with_id(&topic_filter, callback)?;
+        let callback = crate::client::direct::SubscriptionCallback::Plain(
+            Arc::clone(&inner.callback_manager),
+            callback,
+        );
 
         let filter = TopicFilter {
             filter: topic_filter.clone(),
@@ -839,29 +905,42 @@ impl MqttClient {
             packet = packet.with_subscription_identifier(sub_id);
         }
 
-        match inner.subscribe_with_callback(packet, callback_id).await {
-            Ok(results) => {
-                if let Some(&(packet_id, qos)) = results.first() {
-                    Ok((packet_id, qos))
-                } else {
-                    let _ = inner.callback_manager.unregister(&topic_filter);
-                    Err(MqttError::ProtocolError(
-                        "No results returned for subscription".to_string(),
-                    ))
-                }
-            }
-            Err(e) => {
-                let _ = inner.callback_manager.unregister(&topic_filter);
-                Err(e)
-            }
-        }
+        let sent = inner
+            .send_subscribe(
+                packet,
+                callback,
+                crate::client::direct::SubscriptionPersistence::Persist,
+            )
+            .await;
+        drop(inner);
+        let results = sent?.acknowledged().await?;
+        results.first().copied().ok_or_else(|| {
+            MqttError::ProtocolError("No results returned for subscription".to_string())
+        })
     }
 
     /// Unsubscribes from a topic
     ///
+    /// Over QUIC with `StreamStrategy::DataPerTopic` or
+    /// `StreamStrategy::DataPerSubscription`, a call for a topic filter that has no
+    /// cached data stream waits while all cached streams are still writing, and when the
+    /// connection's flow control is exhausted it waits until one of them drains, the
+    /// connection closes or the client disconnects. Like a publish, the call also waits
+    /// while 1 MiB or more is waiting to be written on its connection or topic stream. Wrap
+    /// the call in a timeout if it must finish within a bound.
+    ///
+    /// Once the UNSUBSCRIBE is committed to the connection, the client removes the filter's
+    /// callbacks and the subscription it would restore on a reconnect, whatever the outcome.
+    /// The call does not hold up `disconnect` while it waits for the UNSUBACK.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the operation fails
+    /// Returns [`MqttError::NotConnected`] when the UNSUBSCRIBE was not sent, including when a
+    /// `disconnect` interrupts the call before the packet is committed to the connection; the
+    /// subscription and its callbacks are then left as they were. Returns
+    /// [`MqttError::OutcomeUnknown`] when the UNSUBSCRIBE was sent but the connection closed
+    /// before its UNSUBACK arrived, so the server may still hold the subscription, and
+    /// [`MqttError::Timeout`] when no UNSUBACK arrives within 10 seconds.
     #[instrument(skip(self, topic_filter))]
     pub async fn unsubscribe(&self, topic_filter: impl Into<String>) -> Result<()> {
         let topic_filter = topic_filter.into();
@@ -880,16 +959,14 @@ impl MqttClient {
             properties: Properties::default(),
             protocol_version: inner.options.protocol_version.as_u8(),
         };
-        inner.check_unsubscribe(&packet).await?;
+        let sent = inner.send_unsubscribe(packet).await;
+        drop(inner);
+        let acknowledged = match sent {
+            Ok(sent) => sent.acknowledged().await,
+            Err(e) => Err(e),
+        };
 
-        let _ = inner.callback_manager.unregister(&topic_filter);
-        let _ = inner.ack_callbacks.unregister(&topic_filter);
-        inner
-            .stored_ack_subscriptions
-            .lock()
-            .retain(|(topic, _, _, _)| topic != &topic_filter);
-
-        match inner.unsubscribe(packet).await {
+        match acknowledged {
             Ok(()) => {
                 tracing::info!(
                     client_id = %client_id,
@@ -1050,14 +1127,22 @@ impl MqttClient {
 
     /// Initiates re-authentication with the broker
     ///
+    /// Returns `Ok` once the AUTH packet is written. The server's answer is handled when it
+    /// arrives, by the auth handler.
+    ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Client is not connected
+    /// - Client is not connected, or a `disconnect` interrupted the call before the AUTH
+    ///   packet was committed to the connection: [`MqttError::NotConnected`], and the AUTH
+    ///   was not sent
+    /// - The AUTH was committed but the connection closed before it was written:
+    ///   [`MqttError::OutcomeUnknown`], since part or all of it may have reached the server
     /// - No auth handler is configured
     /// - No authentication method was used during initial connection
     pub async fn reauthenticate(&self) -> Result<()> {
-        self.inner.read().await.reauthenticate().await
+        let written = self.inner.read().await.send_reauthenticate().await?;
+        written.await.map_err(|_| MqttError::OutcomeUnknown)
     }
 
     /// Simulate abnormal disconnection (for testing will messages)
@@ -1066,7 +1151,9 @@ impl MqttClient {
     ///
     /// Returns an error if the operation fails
     pub async fn disconnect_abnormally(&self) -> Result<()> {
+        let request = self.disconnect_requests.begin();
         let mut inner = self.inner.write().await;
+        drop(request);
         inner.disconnect_with_packet(false).await
     }
 
@@ -1287,6 +1374,31 @@ fn build_subscribe_packet(
 mod tests {
     use super::*;
     use crate::time::Duration;
+
+    #[tokio::test]
+    async fn disconnect_cancelled_before_it_holds_the_client_withdraws_its_request() {
+        let client = MqttClient::new("withdrawn-disconnect");
+        let held = client.inner.read().await;
+        let requests = Arc::clone(&held.disconnect_requests);
+        let mut disconnect = Box::pin(client.disconnect());
+
+        let waiting = tokio::time::timeout(Duration::from_millis(100), &mut disconnect)
+            .await
+            .is_err();
+        let requested_while_waiting = requests.pending();
+        drop(disconnect);
+        drop(held);
+
+        assert!(waiting, "disconnect must wait while the client is held");
+        assert!(
+            requested_while_waiting,
+            "a waiting disconnect interrupts other waits"
+        );
+        assert!(
+            !requests.pending(),
+            "a cancelled disconnect left its request in place, so later waits are still interrupted"
+        );
+    }
 
     async fn read_frame(stream: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
         use tokio::io::AsyncReadExt;

@@ -1523,6 +1523,7 @@ impl BridgeConnection {
             MqttError::Io(_)
                 | MqttError::Timeout
                 | MqttError::NotConnected
+                | MqttError::OutcomeUnknown
                 | MqttError::ConnectionError(_)
                 | MqttError::ConnectionClosedByPeer
         ) || !self.client.is_connected().await
