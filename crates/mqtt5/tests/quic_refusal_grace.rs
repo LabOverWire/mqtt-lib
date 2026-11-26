@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 
+fn runtime_password() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("pw-{}-{nanos}", std::process::id())
+}
+
 struct Certified {
     cert_pem: Vec<u8>,
     dir: tempfile::TempDir,
@@ -47,7 +55,7 @@ async fn quic_broker(
             &path,
             format!(
                 "someone:{}\n",
-                PasswordAuthProvider::hash_password("secret").unwrap()
+                PasswordAuthProvider::hash_password(&runtime_password()).unwrap()
             ),
         )
         .unwrap();
