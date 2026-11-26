@@ -367,7 +367,7 @@ async fn acknowledgement<T>(written: PendingFlush, ack: oneshot::Receiver<T>) ->
 
 enum PublishTarget {
     #[cfg(feature = "transport-quic")]
-    Datagram(RoomReservation),
+    Datagram(RoomReservation, Arc<quinn::Connection>),
     #[cfg(feature = "transport-quic")]
     Data(PreparedStream),
     Control(RoomReservation),
@@ -1665,7 +1665,7 @@ impl DirectClientInner {
             .as_ref()
             .map_or_else(|| watch::channel(false).1, |alive| alive.subscribe());
         let committed =
-            self.commit_publish(publish, target, alias_definition, aliases.as_deref_mut());
+            Self::commit_publish(publish, target, alias_definition, aliases.as_deref_mut());
         drop(aliases);
         self.finish_transmit(committed, in_flight, link, Delivery::of(qos, packet_id))
             .await
@@ -1789,8 +1789,8 @@ impl DirectClientInner {
         let writer = Arc::clone(self.writer.as_ref().ok_or(MqttError::NotConnected)?);
         let room = writer.reserve_room(publish.body_encoded_size() + 5).await;
         #[cfg(feature = "transport-quic")]
-        if datagram {
-            return Ok(PublishTarget::Datagram(room));
+        if let (true, Some(connection)) = (datagram, self.quic_connection.as_ref()) {
+            return Ok(PublishTarget::Datagram(room, Arc::clone(connection)));
         }
         Ok(PublishTarget::Control(room))
     }
@@ -1805,7 +1805,6 @@ impl DirectClientInner {
     }
 
     fn commit_publish(
-        &self,
         publish: PublishPacket,
         target: PublishTarget,
         definition: Option<(u16, String)>,
@@ -1820,16 +1819,16 @@ impl DirectClientInner {
         };
         match target {
             #[cfg(feature = "transport-quic")]
-            PublishTarget::Datagram(room) => {
+            PublishTarget::Datagram(room, connection) => {
                 let mut buf = bytes::BytesMut::new();
                 crate::transport::packet_io::encode_packet_to_buffer(
                     &Packet::Publish(publish.clone()),
                     &mut buf,
                 )?;
-                let fits = self
+                let fits = connection
                     .max_datagram_size()
                     .is_some_and(|max_size| buf.len() <= max_size);
-                if fits && self.send_datagram(buf.freeze()).is_ok() {
+                if fits && connection.send_datagram(buf.freeze()).is_ok() {
                     record_alias();
                     tracing::debug!(
                         topic = %publish.topic_name,
@@ -1908,16 +1907,6 @@ impl DirectClientInner {
         self.quic_connection
             .as_ref()
             .and_then(|c| c.max_datagram_size())
-    }
-
-    #[cfg(feature = "transport-quic")]
-    fn send_datagram(&self, data: bytes::Bytes) -> Result<()> {
-        let conn = self
-            .quic_connection
-            .as_ref()
-            .ok_or(MqttError::NotConnected)?;
-        conn.send_datagram(data)
-            .map_err(|e| MqttError::ConnectionError(format!("Datagram send failed: {e}")))
     }
 
     fn create_subscription_from_filter(

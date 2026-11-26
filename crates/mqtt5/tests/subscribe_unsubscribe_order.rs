@@ -1,3 +1,4 @@
+#![cfg(feature = "broker")]
 use mqtt5::broker::config::{BrokerConfig, StorageBackend, StorageConfig};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::broker::MqttBroker;
