@@ -471,40 +471,6 @@ impl InFlight {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct DisconnectRequests {
-    pending: Arc<AtomicUsize>,
-    wakeup: Arc<tokio::sync::Notify>,
-}
-
-pub(crate) struct DisconnectRequest(DisconnectRequests);
-
-impl DisconnectRequests {
-    pub(crate) fn request(&self) -> DisconnectRequest {
-        self.pending.fetch_add(1, Ordering::SeqCst);
-        self.wakeup.notify_waiters();
-        DisconnectRequest(self.clone())
-    }
-
-    async fn requested(&self) {
-        loop {
-            let notified = self.wakeup.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.pending.load(Ordering::SeqCst) > 0 {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-impl Drop for DisconnectRequest {
-    fn drop(&mut self) {
-        self.0.pending.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
 pub struct SessionStateOwner {
     client_id: String,
     pub resumed: bool,
@@ -525,7 +491,6 @@ pub struct DirectClientInner {
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub session_state_owner: SessionStateOwner,
     pub connected: Arc<AtomicBool>,
-    pub(crate) disconnect_requests: DisconnectRequests,
     last_disconnect_reason: Arc<Mutex<Option<DisconnectReason>>>,
     pub connection_event_callbacks:
         Arc<tokio::sync::RwLock<Vec<crate::client::ConnectionEventCallback>>>,
@@ -576,20 +541,39 @@ pub struct DirectClientInner {
 
 pub(crate) struct DisconnectRequests {
     waiting: watch::Sender<usize>,
+    abnormal: AtomicUsize,
 }
 
 impl DisconnectRequests {
     fn new() -> Self {
         Self {
             waiting: watch::channel(0).0,
+            abnormal: AtomicUsize::new(0),
         }
     }
 
     pub(crate) fn begin(self: &Arc<Self>) -> DisconnectRequest {
+        self.start(false)
+    }
+
+    pub(crate) fn begin_abnormal(self: &Arc<Self>) -> DisconnectRequest {
+        self.start(true)
+    }
+
+    fn start(self: &Arc<Self>, abnormal: bool) -> DisconnectRequest {
+        if abnormal {
+            self.abnormal.fetch_add(1, Ordering::SeqCst);
+        }
         self.waiting.send_modify(|waiting| *waiting += 1);
         DisconnectRequest {
             requests: Arc::clone(self),
+            abnormal,
         }
+    }
+
+    fn only_abnormal(&self) -> bool {
+        let waiting = *self.waiting.borrow();
+        waiting > 0 && waiting == self.abnormal.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -609,11 +593,15 @@ impl DisconnectRequests {
 
 pub(crate) struct DisconnectRequest {
     requests: Arc<DisconnectRequests>,
+    abnormal: bool,
 }
 
 impl Drop for DisconnectRequest {
     fn drop(&mut self) {
         self.requests.waiting.send_modify(|waiting| *waiting -= 1);
+        if self.abnormal {
+            self.requests.abnormal.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -652,7 +640,6 @@ impl DirectClientInner {
                 resumed: false,
             },
             connected: Arc::new(AtomicBool::new(false)),
-            disconnect_requests: DisconnectRequests::default(),
             last_disconnect_reason: Arc::new(Mutex::new(None)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
@@ -978,7 +965,8 @@ impl DirectClientInner {
         connect_written: bool,
     ) -> MqttError {
         tracing::debug!("CLIENT: Disconnect requested while waiting for CONNACK");
-        let farewell = connect_written.then(|| {
+        let graceful = !self.disconnect_requests.only_abnormal();
+        let farewell = (connect_written && graceful).then(|| {
             Packet::Disconnect(crate::packet::disconnect::DisconnectPacket::new(
                 ReasonCode::Success,
             ))
@@ -987,8 +975,8 @@ impl DirectClientInner {
             #[cfg(feature = "transport-quic")]
             TransportType::Quic(quic) => match (*quic).into_split() {
                 Ok(split) => {
-                    let mut writer =
-                        UnifiedWriter::QuicControl(split.send, Arc::new(split.connection));
+                    let writer =
+                        UnifiedWriter::quic_control(split.send, Arc::new(split.connection));
                     if let Err(e) = self.within_packet_limit(writer.close(farewell)).await {
                         tracing::debug!("Failed to close a cancelled QUIC connect: {e}");
                     }

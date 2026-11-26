@@ -1151,7 +1151,7 @@ impl MqttClient {
     ///
     /// Returns an error if the operation fails
     pub async fn disconnect_abnormally(&self) -> Result<()> {
-        let request = self.disconnect_requests.begin();
+        let request = self.disconnect_requests.begin_abnormal();
         let mut inner = self.inner.write().await;
         drop(request);
         inner.disconnect_with_packet(false).await
