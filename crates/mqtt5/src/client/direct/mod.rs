@@ -16,7 +16,7 @@ pub(crate) use ack::{AckCallbackManager, AckDispatcher};
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -539,53 +539,60 @@ pub struct DirectClientInner {
     pub(crate) disconnect_requests: Arc<DisconnectRequests>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct PendingDisconnects {
+    all: usize,
+    graceful: usize,
+}
+
 pub(crate) struct DisconnectRequests {
-    waiting: watch::Sender<usize>,
-    abnormal: AtomicUsize,
+    waiting: watch::Sender<PendingDisconnects>,
 }
 
 impl DisconnectRequests {
     fn new() -> Self {
         Self {
-            waiting: watch::channel(0).0,
-            abnormal: AtomicUsize::new(0),
+            waiting: watch::channel(PendingDisconnects::default()).0,
         }
     }
 
     pub(crate) fn begin(self: &Arc<Self>) -> DisconnectRequest {
-        self.start(false)
-    }
-
-    pub(crate) fn begin_abnormal(self: &Arc<Self>) -> DisconnectRequest {
         self.start(true)
     }
 
-    fn start(self: &Arc<Self>, abnormal: bool) -> DisconnectRequest {
-        if abnormal {
-            self.abnormal.fetch_add(1, Ordering::SeqCst);
-        }
-        self.waiting.send_modify(|waiting| *waiting += 1);
-        DisconnectRequest {
-            requests: Arc::clone(self),
-            abnormal,
-        }
+    pub(crate) fn begin_abnormal(self: &Arc<Self>) -> DisconnectRequest {
+        self.start(false)
     }
 
-    fn only_abnormal(&self) -> bool {
-        let waiting = *self.waiting.borrow();
-        waiting > 0 && waiting == self.abnormal.load(Ordering::SeqCst)
+    fn start(self: &Arc<Self>, graceful: bool) -> DisconnectRequest {
+        self.waiting.send_modify(|pending| {
+            pending.all += 1;
+            pending.graceful += usize::from(graceful);
+        });
+        DisconnectRequest {
+            requests: Arc::clone(self),
+            graceful,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn pending(&self) -> bool {
-        *self.waiting.borrow() > 0
+        self.waiting.borrow().all > 0
     }
 
     async fn requested(&self) {
+        self.requested_graceful().await;
+    }
+
+    async fn requested_graceful(&self) -> bool {
         let mut waiting = self.waiting.subscribe();
-        while *waiting.borrow_and_update() == 0 {
+        loop {
+            let pending = *waiting.borrow_and_update();
+            if pending.all > 0 {
+                return pending.graceful > 0;
+            }
             if waiting.changed().await.is_err() {
-                return;
+                return true;
             }
         }
     }
@@ -593,15 +600,15 @@ impl DisconnectRequests {
 
 pub(crate) struct DisconnectRequest {
     requests: Arc<DisconnectRequests>,
-    abnormal: bool,
+    graceful: bool,
 }
 
 impl Drop for DisconnectRequest {
     fn drop(&mut self) {
-        self.requests.waiting.send_modify(|waiting| *waiting -= 1);
-        if self.abnormal {
-            self.requests.abnormal.fetch_sub(1, Ordering::SeqCst);
-        }
+        self.requests.waiting.send_modify(|pending| {
+            pending.all -= 1;
+            pending.graceful -= usize::from(self.graceful);
+        });
     }
 }
 
@@ -948,13 +955,13 @@ impl DirectClientInner {
     ) -> Result<(crate::packet::connack::ConnAckPacket, TransportType)> {
         let mut connect_written = false;
         let exchanged = tokio::select! {
-            connack = self.exchange_connect(&mut transport, &mut connect_written) => Some(connack),
-            () = self.disconnect_requests.requested() => None,
+            connack = self.exchange_connect(&mut transport, &mut connect_written) => Ok(connack),
+            graceful = self.disconnect_requests.requested_graceful() => Err(graceful),
         };
         match exchanged {
-            Some(connack) => Ok((connack?, transport)),
-            None => Err(self
-                .close_cancelled_connect(transport, connect_written)
+            Ok(connack) => Ok((connack?, transport)),
+            Err(graceful) => Err(self
+                .close_cancelled_connect(transport, connect_written && graceful)
                 .await),
         }
     }
@@ -962,11 +969,10 @@ impl DirectClientInner {
     async fn close_cancelled_connect(
         &self,
         transport: TransportType,
-        connect_written: bool,
+        say_goodbye: bool,
     ) -> MqttError {
         tracing::debug!("CLIENT: Disconnect requested while waiting for CONNACK");
-        let graceful = !self.disconnect_requests.only_abnormal();
-        let farewell = (connect_written && graceful).then(|| {
+        let farewell = say_goodbye.then(|| {
             Packet::Disconnect(crate::packet::disconnect::DisconnectPacket::new(
                 ReasonCode::Success,
             ))
