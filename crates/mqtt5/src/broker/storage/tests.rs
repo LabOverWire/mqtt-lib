@@ -3,8 +3,8 @@
 #[cfg(test)]
 use super::super::*;
 use crate::broker::storage::{
-    ClientSession, InflightDirection, InflightMessage, InflightPhase, QueuedMessage,
-    RetainedMessage, StoredSubscription,
+    unix_millis_now, ClientSession, InflightDirection, InflightMessage, InflightPhase,
+    QueuedMessage, RetainedMessage, StoredSubscription,
 };
 use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::properties::{PropertyId, PropertyValue};
@@ -884,4 +884,109 @@ fn a_session_delivers_by_instance_or_for_none_by_filter() {
     assert_eq!(session.subscription_instance("a/+"), held);
     assert_ne!(session.subscription_instance("c/+"), 0);
     assert_ne!(session.subscription_instance("c/+"), held);
+}
+
+fn expiring_publish(packet_id: u16, interval: u32) -> PublishPacket {
+    let mut packet = PublishPacket::new("t/expiring", b"m".to_vec(), QoS::AtLeastOnce);
+    packet.packet_id = Some(packet_id);
+    packet.properties.set_message_expiry_interval(interval);
+    packet
+}
+
+fn four_seconds_ago_ms() -> u64 {
+    unix_millis_now() - 4_000
+}
+
+#[test]
+fn an_inflight_resend_counts_from_when_the_message_was_received() {
+    let inflight = InflightMessage::from_publish(
+        &expiring_publish(5, 10),
+        "c".to_string(),
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    )
+    .with_received_at_ms(four_seconds_ago_ms());
+    let loaded: InflightMessage =
+        serde_json::from_slice(&serde_json::to_vec(&inflight).unwrap()).unwrap();
+    let resend = loaded.to_resend();
+    let packet = resend.to_publish_packet();
+    assert!(packet.dup);
+    assert_eq!(packet.packet_id, Some(5));
+    assert_eq!(packet.properties.get_message_expiry_interval(), Some(6));
+}
+
+#[test]
+fn an_inflight_message_stored_without_a_receive_time_counts_from_when_it_was_stored() {
+    let inflight = InflightMessage::from_publish(
+        &expiring_publish(5, 10),
+        "c".to_string(),
+        InflightDirection::Outbound,
+        InflightPhase::AwaitingPubrec,
+    );
+    let mut json = serde_json::to_value(&inflight).unwrap();
+    let fields = json.as_object_mut().unwrap();
+    fields.remove("received_at_ms");
+    fields.remove("expires_at_secs");
+    fields.insert(
+        "stored_at_secs".to_string(),
+        serde_json::json!(four_seconds_ago_ms() / 1000),
+    );
+    let loaded: InflightMessage = serde_json::from_value(json).unwrap();
+    let remaining = loaded
+        .to_resend()
+        .to_publish_packet()
+        .properties
+        .get_message_expiry_interval();
+    assert!(
+        remaining.is_some_and(|seconds| (5..=6).contains(&seconds)),
+        "remaining {remaining:?}"
+    );
+}
+
+#[test]
+fn a_queued_message_stored_without_a_receive_time_counts_from_when_it_was_queued() {
+    let queued = QueuedMessage::new(
+        expiring_publish(5, 10),
+        "c".to_string(),
+        QoS::AtLeastOnce,
+        Some(5),
+    );
+    let mut json = serde_json::to_value(&queued).unwrap();
+    let fields = json.as_object_mut().unwrap();
+    fields.remove("received_at_ms");
+    fields.insert(
+        "queued_at_secs".to_string(),
+        serde_json::json!(four_seconds_ago_ms() / 1000),
+    );
+    let mut loaded: QueuedMessage = serde_json::from_value(json).unwrap();
+    loaded.recompute_expiry();
+    let remaining = loaded.remaining_expiry_interval();
+    assert!(
+        remaining.is_some_and(|seconds| (5..=6).contains(&seconds)),
+        "remaining {remaining:?}"
+    );
+    assert!(!loaded.is_expired());
+}
+
+#[test]
+fn a_requeued_message_keeps_the_receive_time_it_had() {
+    let received_at_ms = four_seconds_ago_ms();
+    let queued = QueuedMessage::new(
+        expiring_publish(5, 10),
+        "c".to_string(),
+        QoS::AtLeastOnce,
+        None,
+    )
+    .with_received_at_ms(received_at_ms);
+    let mut loaded: QueuedMessage =
+        serde_json::from_slice(&serde_json::to_vec(&queued).unwrap()).unwrap();
+    loaded.recompute_expiry();
+    assert_eq!(loaded.received_ms(), received_at_ms);
+    assert_eq!(
+        loaded
+            .to_publish_packet()
+            .properties
+            .get_message_expiry_interval(),
+        Some(6)
+    );
 }

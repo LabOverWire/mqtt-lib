@@ -2,9 +2,7 @@
 
 use crate::client::connection::{ConnectionEvent, DisconnectReason};
 use crate::client::{fire_connection_event, ConnectionEventCallback};
-use crate::error::Result;
 use crate::packet::Packet;
-use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -129,40 +127,8 @@ impl ConnectionLifecycle {
     }
 }
 
-pub(super) const PINGREQ_LOG_INTERVAL: u32 = 20;
-
-pub(super) async fn send_pingreq_with_priority(
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
-    config: &mqtt5_protocol::KeepaliveConfig,
-) -> Result<()> {
-    let max_attempts = config.lock_retry_attempts;
-    let retry_delay = Duration::from_millis(u64::from(config.lock_retry_delay_ms));
-
-    for attempt in 0..max_attempts {
-        if let Ok(mut guard) = writer.try_lock() {
-            return guard.write_packet(Packet::PingReq).await;
-        }
-
-        if attempt > 0 && attempt % PINGREQ_LOG_INTERVAL == 0 {
-            tracing::warn!(
-                attempt,
-                max_attempts,
-                "PINGREQ waiting for writer lock - possible contention"
-            );
-        }
-
-        tokio::time::sleep(retry_delay).await;
-    }
-
-    tracing::error!(
-        max_attempts,
-        "Failed to acquire writer lock for PINGREQ, falling back to blocking"
-    );
-    writer.lock().await.write_packet(Packet::PingReq).await
-}
-
 pub(super) async fn keepalive_task_with_writer(
-    writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: Arc<UnifiedWriter>,
     keepalive_interval: Duration,
     keepalive_state: Arc<Mutex<KeepaliveState>>,
     lifecycle: ConnectionLifecycle,
@@ -206,12 +172,7 @@ pub(super) async fn keepalive_task_with_writer(
             continue;
         }
 
-        match tokio::time::timeout(
-            timeout_duration,
-            send_pingreq_with_priority(&writer, &config),
-        )
-        .await
-        {
+        match tokio::time::timeout(timeout_duration, writer.send(Packet::PingReq)).await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::error!("Error sending PINGREQ: {e}");

@@ -1,6 +1,6 @@
 use crate::broker::events::{ClientPublishEvent, MessageDeliveredEvent, PublishAction};
 use crate::broker::storage::{
-    InflightDirection, InflightMessage, InflightPhase, QueueHandle, QueuedMessage, StorageBackend,
+    InflightDirection, InflightMessage, InflightPhase, QueueHandle, StorageBackend,
 };
 use crate::error::{MqttError, Result};
 use crate::packet::disconnect::DisconnectPacket;
@@ -505,15 +505,16 @@ impl ClientHandler {
             return Ok(());
         }
 
-        if let Some(publish) = self.outbound_inflight.get(&pubrec.packet_id) {
+        if let Some(routable) = self.outbound_inflight.get(&pubrec.packet_id) {
             self.awaiting_pubcomp.insert(pubrec.packet_id);
             if let Some(ref storage) = self.storage {
                 let inflight = InflightMessage::from_publish(
-                    publish,
+                    &routable.publish,
                     self.client_id.as_ref().unwrap().clone(),
                     InflightDirection::Outbound,
                     InflightPhase::AwaitingPubcomp,
-                );
+                )
+                .with_received_at_ms(routable.received_at_ms);
                 if let Err(e) = storage.store_inflight_message(inflight).await {
                     debug!(
                         "failed to update inflight phase for {}: {e}",
@@ -607,10 +608,9 @@ impl ClientHandler {
     /// waited. A delivery already started, sent again with DUP and its packet identifier, is
     /// completed.
     fn withheld(&self, routable: &RoutableMessage) -> bool {
-        let publish = &routable.publish;
-        !(publish.dup && publish.packet_id.is_some())
+        !routable.started()
             && self.session.as_ref().is_some_and(|session| {
-                !session.delivers(routable.subscription_instance, &publish.topic_name)
+                !session.delivers(routable.subscription_instance, &routable.publish.topic_name)
             })
     }
 
@@ -623,8 +623,15 @@ impl ClientHandler {
             );
             return Ok(());
         }
+        if routable.expired() && !routable.started() {
+            debug!(
+                topic = %routable.publish.topic_name,
+                "Dropping PUBLISH whose Message Expiry Interval passed before its delivery started"
+            );
+            return Ok(());
+        }
         self.pending_target_flow = routable.target_flow;
-        let result = self.send_publish(routable.publish).await;
+        let result = self.send_publish(routable).await;
         self.pending_target_flow = None;
         result
     }
@@ -644,7 +651,13 @@ impl ClientHandler {
             .await
     }
 
-    pub(super) async fn send_publish(&mut self, mut publish: PublishPacket) -> Result<()> {
+    pub(super) async fn send_publish(&mut self, routable: RoutableMessage) -> Result<()> {
+        let RoutableMessage {
+            mut publish,
+            target_flow,
+            subscription_instance,
+            received_at_ms,
+        } = routable.restamped();
         if !self.delivery_authorized(&publish).await {
             debug!(
                 topic = %publish.topic_name,
@@ -700,14 +713,23 @@ impl ClientHandler {
                         self.client_id.as_ref().unwrap().clone(),
                         InflightDirection::Outbound,
                         InflightPhase::AwaitingPubrec,
-                    );
+                    )
+                    .with_received_at_ms(received_at_ms);
                     if let Err(e) = storage.store_inflight_message(inflight).await {
                         debug!("failed to persist outbound inflight {packet_id}: {e}");
                     }
                 }
                 self.inflight_order.retain(|id| *id != packet_id);
                 self.inflight_order.push_back(packet_id);
-                self.outbound_inflight.insert(packet_id, publish);
+                self.outbound_inflight.insert(
+                    packet_id,
+                    RoutableMessage {
+                        publish,
+                        target_flow,
+                        subscription_instance,
+                        received_at_ms,
+                    },
+                );
             }
         }
         let write_timeout = self.write_timeout();
@@ -757,11 +779,7 @@ impl ClientHandler {
                 self.held.extend(pending);
                 return Ok(());
             }
-            let routable = RoutableMessage {
-                target_flow: message.target_flow,
-                subscription_instance: message.subscription_instance,
-                publish: message.to_publish_packet(),
-            };
+            let routable = RoutableMessage::from_queued(&message);
             if let Err(e) = self.send_routable(routable).await {
                 self.held.extend(pending);
                 return Err(e);
@@ -860,19 +878,12 @@ impl ClientHandler {
             match msg.direction {
                 InflightDirection::Outbound => match msg.phase {
                     InflightPhase::AwaitingPubrec => {
-                        let mut queued = QueuedMessage::new(
-                            msg.to_publish_packet(),
-                            client_id.clone(),
-                            msg.qos,
-                            Some(msg.packet_id),
-                        );
-                        queued.dup = true;
-                        requeue.push(queued);
+                        requeue.push(msg.to_resend());
                     }
                     InflightPhase::AwaitingPubcomp => {
-                        let publish = msg.to_publish_packet();
                         self.inflight_order.push_back(msg.packet_id);
-                        self.outbound_inflight.insert(msg.packet_id, publish);
+                        self.outbound_inflight
+                            .insert(msg.packet_id, RoutableMessage::from_inflight(&msg));
                         self.awaiting_pubcomp.insert(msg.packet_id);
                         let mut pubrel = PubRelPacket::new(msg.packet_id);
                         pubrel.reason_code = ReasonCode::Success;
