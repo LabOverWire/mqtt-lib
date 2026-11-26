@@ -372,6 +372,21 @@ impl QuicTransport {
     }
 }
 
+const TLS_REFUSAL: &str = "QUIC TLS handshake refused";
+
+fn refused_in_tls(error: &quinn::ConnectionError) -> bool {
+    let code = match error {
+        quinn::ConnectionError::TransportError(e) => e.code,
+        quinn::ConnectionError::ConnectionClosed(close) => close.error_code,
+        _ => return false,
+    };
+    (0x100..0x200).contains(&u64::from(code))
+}
+
+pub(crate) fn is_tls_refusal(error: &MqttError) -> bool {
+    matches!(error, MqttError::ConnectionError(message) if message.contains(TLS_REFUSAL))
+}
+
 async fn handshake(
     connecting: quinn::Connecting,
     enable_early_data: bool,
@@ -396,9 +411,13 @@ async fn handshake(
     } else {
         connecting
     };
-    let connection = connecting
-        .await
-        .map_err(|e| MqttError::ConnectionError(format!("QUIC handshake failed: {e}")))?;
+    let connection = connecting.await.map_err(|e| {
+        if refused_in_tls(&e) {
+            MqttError::ConnectionError(format!("{TLS_REFUSAL}: {e}"))
+        } else {
+            MqttError::ConnectionError(format!("QUIC handshake failed: {e}"))
+        }
+    })?;
     Ok((connection, false))
 }
 

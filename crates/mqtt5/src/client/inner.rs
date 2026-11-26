@@ -767,7 +767,15 @@ impl MqttClient {
                     }
                     Err(e) => {
                         tracing::debug!("Failed to connect to {}: {}", addr, e);
+                        #[cfg(feature = "transport-quic")]
+                        let same_for_every_address = crate::transport::quic::is_tls_refusal(&e);
+                        #[cfg(not(feature = "transport-quic"))]
+                        let same_for_every_address = false;
                         last_error = Some(Self::worse_connect_error(last_error, e));
+                        if same_for_every_address {
+                            remaining.clear();
+                            break;
+                        }
                     }
                 }
             }
