@@ -3251,4 +3251,98 @@ mod tests {
             vec![('x', true, vec![0, 1]), ('n', false, vec![0, 2])]
         );
     }
+
+    fn decoded_publishes(bytes: &[u8]) -> Vec<mqtt5_protocol::packet::publish::PublishPacket> {
+        use bytes::Buf;
+        use mqtt5_protocol::packet::{FixedHeader, PacketType};
+        let mut rest = bytes::Bytes::copy_from_slice(bytes);
+        let mut publishes = Vec::new();
+        while rest.has_remaining() {
+            let header = FixedHeader::decode(&mut rest).unwrap();
+            let mut body = rest.split_to(usize::try_from(header.remaining_length).unwrap());
+            if header.packet_type == PacketType::Publish {
+                publishes.push(
+                    mqtt5_protocol::packet::publish::PublishPacket::decode_body(&mut body, &header)
+                        .unwrap(),
+                );
+            }
+        }
+        publishes
+    }
+
+    async fn route_expiring(broker: &WasmBroker, topic: &str, payload: &[u8], expiry: u32) {
+        let mut publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            topic,
+            payload.to_vec(),
+            QoS::AtLeastOnce,
+        );
+        publish.properties.set_message_expiry_interval(expiry);
+        broker.router.route_message(&publish, None).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_resend_counts_the_time_its_first_delivery_spent_in_flight() {
+        let broker = broker();
+        let first = connected(&broker, connect_options("held-x", true, 3600)).await;
+        subscribed_at(&first, "held/x", 1).await;
+        route_expiring(&broker, "held/x", b"x", 10).await;
+        sleep(100).await;
+        let sent = decoded_publishes(&first.received());
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].properties.get_message_expiry_interval(), Some(10));
+        sleep(4_000).await;
+        first.port.close();
+        sleep(200).await;
+        let second = start_connect(&broker, connect_options("held-x", false, 3600));
+        sleep(400).await;
+        let resent = decoded_publishes(&second.received());
+        assert_eq!(resent.len(), 1);
+        assert!(resent[0].dup);
+        let remaining = resent[0].properties.get_message_expiry_interval();
+        assert!(
+            remaining.is_some_and(|seconds| seconds <= 6),
+            "resend sent over 4s after a 10s message was received carries {remaining:?}"
+        );
+    }
+
+    async fn sent_after_waiting_behind_a_full_window(
+        client_id: &str,
+        expiry: u32,
+        wait_ms: u32,
+    ) -> Vec<mqtt5_protocol::packet::publish::PublishPacket> {
+        let broker = broker();
+        let client = connected(
+            &broker,
+            connect_options(client_id, true, 3600).with_receive_maximum(1),
+        )
+        .await;
+        subscribed_at(&client, "window/x", 1).await;
+        route(&broker, "window/x", b"a", QoS::AtLeastOnce).await;
+        sleep(100).await;
+        let first = publish_frames(&client.received());
+        assert_eq!(first.len(), 1);
+        route_expiring(&broker, "window/x", b"w", expiry).await;
+        sleep(wait_ms).await;
+        client.clear();
+        client.send_raw(&puback(&publish_packet_id(&first[0].1)));
+        sleep(400).await;
+        decoded_publishes(&client.received())
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_message_waiting_behind_a_full_window_counts_the_time_it_waited() {
+        let sent = sent_after_waiting_behind_a_full_window("window-1", 10, 4_000).await;
+        assert_eq!(sent.len(), 1);
+        let remaining = sent[0].properties.get_message_expiry_interval();
+        assert!(
+            remaining.is_some_and(|seconds| seconds <= 6),
+            "message sent over 4s after a 10s message was received carries {remaining:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_message_that_expires_behind_a_full_window_is_not_delivered() {
+        let sent = sent_after_waiting_behind_a_full_window("window-2", 1, 2_500).await;
+        assert!(sent.is_empty(), "received {sent:?}");
+    }
 }

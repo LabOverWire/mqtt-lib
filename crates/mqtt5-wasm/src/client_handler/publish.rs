@@ -1,3 +1,4 @@
+use mqtt5::broker::router::RoutableMessage;
 use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase, StorageBackend};
 use mqtt5_protocol::error::Result;
 use mqtt5_protocol::packet::puback::PubAckPacket;
@@ -165,13 +166,14 @@ impl WasmClientHandler {
             self.outbound_inflight
                 .borrow()
                 .get(pubrec.packet_id)
-                .map(|publish| {
+                .map(|routable| {
                     InflightMessage::from_publish(
-                        publish,
+                        &routable.publish,
                         client_id.clone(),
                         InflightDirection::Outbound,
                         InflightPhase::AwaitingPubcomp,
                     )
+                    .with_received_at_ms(routable.received_at_ms)
                 })
         });
         if let Some(inflight) = inflight {
@@ -246,7 +248,7 @@ impl WasmClientHandler {
                 (InflightDirection::Outbound, InflightPhase::AwaitingPubcomp) => {
                     self.outbound_inflight
                         .borrow_mut()
-                        .insert_released(msg.packet_id, msg.to_publish_packet());
+                        .insert_released(msg.packet_id, RoutableMessage::from_inflight(&msg));
                     let pubrel = PubRelPacket::new(msg.packet_id);
                     Self::write_packet(&Packet::PubRel(pubrel), writer)?;
                 }
