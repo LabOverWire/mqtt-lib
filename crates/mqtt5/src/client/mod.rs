@@ -143,6 +143,7 @@ pub struct MqttClient {
     pub(crate) monitor_wakeup: Arc<tokio::sync::Notify>,
     pub(crate) cancelled_connect: Arc<parking_lot::Mutex<Option<inner::ReplacedByConnect>>>,
     pub(crate) monitored_connect: Arc<parking_lot::Mutex<Option<u64>>>,
+    pub(crate) unsettled_restore: Arc<parking_lot::Mutex<state::UnsettledRestore>>,
     pub(crate) tls_config: Arc<RwLock<StoredTlsConfig>>,
     pub(crate) transport_config: Arc<RwLock<crate::transport::ClientTransportConfig>>,
     #[cfg(feature = "transport-quic")]

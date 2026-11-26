@@ -158,9 +158,6 @@ impl MqttClient {
         self.recover_quic_flows().await;
         self.restore_subscriptions_after_connect(stored_subs, session_state_resumed)
             .await;
-        if !session_state_resumed {
-            self.restore_ack_subscriptions_after_lost_session().await;
-        }
     }
 
     #[cfg(any(not(feature = "transport-websocket"), not(feature = "transport-quic")))]
@@ -1054,7 +1051,6 @@ impl MqttClient {
                 client
                     .restore_subscriptions_after_connect(stored_subs, false)
                     .await;
-                client.restore_ack_subscriptions_after_lost_session().await;
             });
             return;
         }
