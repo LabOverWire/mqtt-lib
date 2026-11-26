@@ -301,6 +301,18 @@ pub fn unix_millis_now() -> u64 {
         })
 }
 
+#[must_use]
+pub fn expiry_left(interval: u32, received_at_ms: u64) -> u32 {
+    let waited = unix_millis_now().saturating_sub(received_at_ms) / 1000;
+    interval.saturating_sub(u32::try_from(waited).unwrap_or(u32::MAX))
+}
+
+fn expiry_deadline(interval: u32, received_at_ms: u64) -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        + Duration::from_millis(received_at_ms)
+        + Duration::from_secs(u64::from(interval))
+}
+
 fn default_receive_maximum() -> u16 {
     65535
 }
@@ -318,9 +330,11 @@ pub struct QueuedMessage {
     pub qos: QoS,
     /// When the message was queued (Unix timestamp in seconds)
     pub queued_at_secs: u64,
-    /// Original message expiry interval in seconds (if any)
+    #[serde(default)]
+    pub received_at_ms: Option<u64>,
+    /// Message expiry interval in seconds as the broker received it (if any)
     pub message_expiry_interval: Option<u32>,
-    /// Message expiry time (computed from `queued_at` + interval)
+    /// Message expiry time (computed from the receive time + interval)
     #[serde(skip)]
     pub expires_at: Option<SystemTime>,
     /// Packet ID for `QoS` 1/2 delivery
@@ -1082,14 +1096,11 @@ impl QueuedMessage {
     /// Create new queued message from PUBLISH packet
     #[must_use]
     pub fn new(packet: PublishPacket, client_id: String, qos: QoS, packet_id: Option<u16>) -> Self {
-        let now = SystemTime::now();
-        let queued_at_secs = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let received_at_ms = unix_millis_now();
+        let queued_at_secs = received_at_ms / 1000;
         let message_expiry_interval = packet.properties.get_message_expiry_interval();
         let expires_at =
-            message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
+            message_expiry_interval.map(|interval| expiry_deadline(interval, received_at_ms));
 
         let props = V5PublishProps::from_packet(&packet);
         Self {
@@ -1098,6 +1109,7 @@ impl QueuedMessage {
             client_id,
             qos,
             queued_at_secs,
+            received_at_ms: Some(received_at_ms),
             message_expiry_interval,
             expires_at,
             packet_id,
@@ -1126,24 +1138,46 @@ impl QueuedMessage {
         self
     }
 
+    #[must_use]
+    pub fn with_received_at_ms(mut self, received_at_ms: u64) -> Self {
+        self.received_at_ms = Some(received_at_ms);
+        self.recompute_expiry();
+        self
+    }
+
+    #[must_use]
+    pub fn received_ms(&self) -> u64 {
+        self.received_at_ms
+            .unwrap_or_else(|| self.queued_at_secs.saturating_mul(1000))
+    }
+
     /// Recompute `expires_at` from stored fields (call after deserialization)
     pub fn recompute_expiry(&mut self) {
-        if let Some(interval) = self.message_expiry_interval {
-            let queued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(self.queued_at_secs);
-            self.expires_at = Some(queued_at + Duration::from_secs(u64::from(interval)));
-        }
+        let received_at_ms = self.received_ms();
+        self.expires_at = self
+            .message_expiry_interval
+            .map(|interval| expiry_deadline(interval, received_at_ms));
     }
 
     /// Convert to `PublishPacket` for delivery
     #[must_use]
     pub fn to_publish_packet(&self) -> PublishPacket {
+        self.packet_with_expiry(self.remaining_expiry_interval())
+    }
+
+    #[must_use]
+    pub fn received_packet(&self) -> PublishPacket {
+        self.packet_with_expiry(self.message_expiry_interval)
+    }
+
+    fn packet_with_expiry(&self, expiry_interval: Option<u32>) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos);
         packet.packet_id = self.packet_id;
         packet.dup = self.dup;
         packet.retain = self.retain;
 
-        if let Some(remaining) = self.remaining_expiry_interval() {
-            packet.properties.set_message_expiry_interval(remaining);
+        if let Some(interval) = expiry_interval {
+            packet.properties.set_message_expiry_interval(interval);
         }
         for id in &self.subscription_identifiers {
             packet.properties.set_subscription_identifier(*id);
@@ -1162,12 +1196,9 @@ impl QueuedMessage {
 
     #[must_use]
     pub fn remaining_expiry_interval(&self) -> Option<u32> {
-        self.expires_at.and_then(|expiry| {
-            expiry
-                .duration_since(SystemTime::now())
-                .ok()
-                .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
-        })
+        let received_at_ms = self.received_ms();
+        self.message_expiry_interval
+            .map(|interval| expiry_left(interval, received_at_ms))
     }
 
     #[must_use]
@@ -1206,11 +1237,11 @@ pub struct InflightMessage {
     pub qos: QoS,
     pub retain: bool,
     pub stored_at_secs: u64,
+    #[serde(default)]
+    pub received_at_ms: Option<u64>,
     pub message_expiry_interval: Option<u32>,
     #[serde(default)]
     pub expires_at_secs: Option<u64>,
-    #[serde(skip)]
-    expires_at_cache: Option<SystemTime>,
     #[serde(default)]
     pub user_properties: Vec<(String, String)>,
     pub content_type: Option<String>,
@@ -1227,20 +1258,10 @@ impl InflightMessage {
         direction: InflightDirection,
         phase: InflightPhase,
     ) -> Self {
-        let now = SystemTime::now();
-        let stored_at_secs = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let message_expiry_interval = packet.properties.get_message_expiry_interval();
-        let expires_at_secs =
-            message_expiry_interval.map(|interval| stored_at_secs + u64::from(interval));
-        let expires_at_cache =
-            message_expiry_interval.map(|interval| now + Duration::from_secs(u64::from(interval)));
-
+        let received_at_ms = unix_millis_now();
         let v5 = V5PublishProps::from_packet(packet);
 
-        Self {
+        let mut message = Self {
             client_id,
             packet_id: packet.packet_id.unwrap_or(0),
             direction,
@@ -1249,26 +1270,75 @@ impl InflightMessage {
             payload: packet.payload.to_vec(),
             qos: packet.qos,
             retain: packet.retain,
-            stored_at_secs,
-            message_expiry_interval,
-            expires_at_secs,
-            expires_at_cache,
+            stored_at_secs: received_at_ms / 1000,
+            received_at_ms: None,
+            message_expiry_interval: packet.properties.get_message_expiry_interval(),
+            expires_at_secs: None,
             user_properties: v5.user_properties,
             content_type: v5.content_type,
             response_topic: v5.response_topic,
             correlation_data: v5.correlation_data,
             payload_format_indicator: v5.payload_format_indicator,
-        }
+        };
+        message.set_received_at_ms(received_at_ms);
+        message
+    }
+
+    #[must_use]
+    pub fn with_received_at_ms(mut self, received_at_ms: u64) -> Self {
+        self.set_received_at_ms(received_at_ms);
+        self
+    }
+
+    fn set_received_at_ms(&mut self, received_at_ms: u64) {
+        self.received_at_ms = Some(received_at_ms);
+        self.expires_at_secs = self
+            .message_expiry_interval
+            .map(|interval| received_at_ms / 1000 + u64::from(interval));
+    }
+
+    #[must_use]
+    pub fn received_ms(&self) -> u64 {
+        self.received_at_ms.unwrap_or_else(|| {
+            self.expires_at_secs
+                .zip(self.message_expiry_interval)
+                .map_or(self.stored_at_secs, |(expires_at_secs, interval)| {
+                    expires_at_secs.saturating_sub(u64::from(interval))
+                })
+                .saturating_mul(1000)
+        })
     }
 
     #[must_use]
     pub fn to_publish_packet(&self) -> PublishPacket {
+        self.packet_with_expiry(self.remaining_expiry_interval())
+    }
+
+    #[must_use]
+    pub fn to_resend(&self) -> QueuedMessage {
+        let mut queued = QueuedMessage::new(
+            self.received_packet(),
+            self.client_id.clone(),
+            self.qos,
+            Some(self.packet_id),
+        )
+        .with_received_at_ms(self.received_ms());
+        queued.dup = true;
+        queued
+    }
+
+    #[must_use]
+    pub fn received_packet(&self) -> PublishPacket {
+        self.packet_with_expiry(self.message_expiry_interval)
+    }
+
+    fn packet_with_expiry(&self, expiry_interval: Option<u32>) -> PublishPacket {
         let mut packet = PublishPacket::new(&self.topic, self.payload.clone(), self.qos)
             .with_retain(self.retain);
         packet.packet_id = Some(self.packet_id);
 
-        if let Some(remaining) = self.remaining_expiry_interval() {
-            packet.properties.set_message_expiry_interval(remaining);
+        if let Some(interval) = expiry_interval {
+            packet.properties.set_message_expiry_interval(interval);
         }
 
         apply_v5_props(
@@ -1284,20 +1354,16 @@ impl InflightMessage {
     }
 
     fn resolved_expires_at(&self) -> Option<SystemTime> {
-        self.expires_at_cache.or_else(|| {
-            self.expires_at_secs
-                .map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
-        })
+        let received_at_ms = self.received_ms();
+        self.message_expiry_interval
+            .map(|interval| expiry_deadline(interval, received_at_ms))
     }
 
     #[must_use]
     pub fn remaining_expiry_interval(&self) -> Option<u32> {
-        self.resolved_expires_at().and_then(|expiry| {
-            expiry
-                .duration_since(SystemTime::now())
-                .ok()
-                .map(|d| u32::try_from(d.as_secs()).unwrap_or(u32::MAX))
-        })
+        let received_at_ms = self.received_ms();
+        self.message_expiry_interval
+            .map(|interval| expiry_left(interval, received_at_ms))
     }
 
     #[must_use]
