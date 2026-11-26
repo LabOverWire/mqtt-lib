@@ -43,6 +43,12 @@ async fn start(auth: Arc<dyn AuthProvider>) -> (SocketAddr, Arc<MessageRouter>) 
     (addr, router)
 }
 
+fn signing_key() -> Vec<u8> {
+    let mut key = vec![0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut key).unwrap();
+    key
+}
+
 fn token(key: &[u8]) -> String {
     let header = BASE64_URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
     let exp = std::time::SystemTime::now()
@@ -77,7 +83,7 @@ async fn route(router: &MessageRouter, topic: &str) {
 
 async fn role_deny_after_other_connection_closes(session_scoped: bool) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
-    let key = b"0123456789abcdef0123456789abcdef".to_vec();
+    let key = signing_key();
     let key_path = dir.path().join("key");
     std::fs::write(&key_path, &key).unwrap();
     let issuer = JwtIssuerConfig::new(
@@ -150,7 +156,7 @@ async fn a_role_deny_withholds_after_another_connection_closes_with_unscoped_rol
 
 async fn role_deny_after_takeover(session_scoped: bool) -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();
-    let key = b"0123456789abcdef0123456789abcdef".to_vec();
+    let key = signing_key();
     let key_path = dir.path().join("key");
     std::fs::write(&key_path, &key).unwrap();
     let issuer = JwtIssuerConfig::new(
@@ -319,7 +325,7 @@ impl mqtt5::AuthHandler for Token {
 #[tokio::test]
 async fn a_federated_users_roles_stay_after_its_last_connection_ends() {
     let dir = tempfile::tempdir().unwrap();
-    let key = b"0123456789abcdef0123456789abcdef".to_vec();
+    let key = signing_key();
     let key_path = dir.path().join("key");
     std::fs::write(&key_path, &key).unwrap();
     let issuer = JwtIssuerConfig::new(
@@ -351,4 +357,51 @@ async fn a_federated_users_roles_stay_after_its_last_connection_ends() {
     client.disconnect().await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(acl.read().await.get_federated_roles(user).await.is_some());
+}
+
+#[tokio::test]
+async fn a_role_still_authorizes_subscribes_after_another_connection_of_the_user_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = signing_key();
+    let key_path = dir.path().join("key");
+    std::fs::write(&key_path, &key).unwrap();
+    let issuer = JwtIssuerConfig::new(
+        "idp",
+        "https://idp.test",
+        JwtKeySource::StaticFile {
+            algorithm: JwtAlgorithm::HS256,
+            path: key_path,
+        },
+    )
+    .with_auth_mode(FederatedAuthMode::ClaimBinding)
+    .with_default_roles(vec!["reader".to_string()]);
+    let acl = AclManager::new();
+    acl.add_role("reader").await;
+    acl.add_role_rule("reader", "data/#", Permission::ReadWrite)
+        .await
+        .unwrap();
+    let provider = FederatedJwtAuthProvider::new(vec![issuer])
+        .unwrap()
+        .with_acl_manager(Arc::new(RwLock::new(acl)));
+    let (addr, _router) = start(Arc::new(provider)).await;
+    let url = format!("mqtt://{addr}");
+
+    let staying = MqttClient::new("device-c");
+    staying
+        .connect_with_options(&url, options("device-c", &key))
+        .await
+        .unwrap();
+    let before = staying.subscribe("data/before", |_| {}).await;
+
+    let leaving = MqttClient::new("device-d");
+    leaving
+        .connect_with_options(&url, options("device-d", &key))
+        .await
+        .unwrap();
+    leaving.disconnect().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let after = staying.subscribe("data/after", |_| {}).await;
+    assert!(before.is_ok(), "subscribe before: {before:?}");
+    assert!(after.is_ok(), "subscribe after: {after:?}");
 }
