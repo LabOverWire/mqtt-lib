@@ -134,6 +134,7 @@ use self::direct::{
 pub struct MqttClient {
     pub(crate) inner: Arc<RwLock<DirectClientInner>>,
     pub(crate) connected: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) disconnect_requests: direct::DisconnectRequests,
     pub(crate) connection_event_callbacks: Arc<RwLock<Vec<ConnectionEventCallback>>>,
     pub(crate) error_recovery_config: Arc<RwLock<error_recovery::ErrorRecoveryConfig>>,
     pub(crate) connection_mutex: Arc<tokio::sync::Mutex<()>>,
@@ -397,10 +398,12 @@ impl MqttClient {
     /// Returns an error if the operation fails
     #[instrument(skip(self))]
     pub async fn disconnect(&self) -> Result<()> {
-        let client_id = self.client_id().await;
+        let request = self.disconnect_requests.request();
+        let mut inner = self.inner.write().await;
+        drop(request);
+        let client_id = inner.session.read().await.client_id().to_string();
         tracing::info!(client_id = %client_id, "Initiating MQTT disconnect");
 
-        let mut inner = self.inner.write().await;
         inner.automatic_reconnect_lifecycle = AutomaticReconnectLifecycle::Stopped;
         self.monitor_wakeup.notify_one();
         match inner.disconnect().await {

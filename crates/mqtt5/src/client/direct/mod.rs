@@ -16,7 +16,7 @@ pub(crate) use ack::{AckCallbackManager, AckDispatcher};
 
 use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
@@ -232,6 +232,40 @@ impl InFlight {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct DisconnectRequests {
+    pending: Arc<AtomicUsize>,
+    wakeup: Arc<tokio::sync::Notify>,
+}
+
+pub(crate) struct DisconnectRequest(DisconnectRequests);
+
+impl DisconnectRequests {
+    pub(crate) fn request(&self) -> DisconnectRequest {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        self.wakeup.notify_waiters();
+        DisconnectRequest(self.clone())
+    }
+
+    async fn requested(&self) {
+        loop {
+            let notified = self.wakeup.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.pending.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl Drop for DisconnectRequest {
+    fn drop(&mut self) {
+        self.0.pending.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct SessionStateOwner {
     client_id: String,
     pub resumed: bool,
@@ -252,6 +286,7 @@ pub struct DirectClientInner {
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub session_state_owner: SessionStateOwner,
     pub connected: Arc<AtomicBool>,
+    pub(crate) disconnect_requests: DisconnectRequests,
     last_disconnect_reason: Arc<Mutex<Option<DisconnectReason>>>,
     pub connection_event_callbacks:
         Arc<tokio::sync::RwLock<Vec<crate::client::ConnectionEventCallback>>>,
@@ -334,6 +369,7 @@ impl DirectClientInner {
                 resumed: false,
             },
             connected: Arc::new(AtomicBool::new(false)),
+            disconnect_requests: DisconnectRequests::default(),
             last_disconnect_reason: Arc::new(Mutex::new(None)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
@@ -604,12 +640,10 @@ impl DirectClientInner {
         }
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
-        self.reset_connection_runtime(b"reconnect").await;
-
+    async fn exchange_connect(
+        &self,
+        transport: &mut TransportType,
+    ) -> Result<crate::packet::connack::ConnAckPacket> {
         let connect_packet = self.sendable_connect_packet().await?;
 
         self.within_packet_limit(transport.write_packet(connect_packet))
@@ -617,7 +651,24 @@ impl DirectClientInner {
 
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
-        let connack = self.wait_for_connack(&mut transport).await?;
+        self.wait_for_connack(transport).await
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails
+    pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
+        self.reset_connection_runtime(b"reconnect").await;
+
+        let connack = tokio::select! {
+            connack = self.exchange_connect(&mut transport) => connack?,
+            () = self.disconnect_requests.requested() => {
+                tracing::debug!("CLIENT: Disconnect requested while waiting for CONNACK");
+                return Err(MqttError::ConnectionError(
+                    "disconnect was called while the connection was being opened".to_string(),
+                ));
+            }
+        };
 
         if connack.reason_code == ReasonCode::UseAnotherServer
             || connack.reason_code == ReasonCode::ServerMoved
