@@ -643,15 +643,46 @@ impl DirectClientInner {
     async fn exchange_connect(
         &self,
         transport: &mut TransportType,
+        connect_written: &mut bool,
     ) -> Result<crate::packet::connack::ConnAckPacket> {
         let connect_packet = self.sendable_connect_packet().await?;
 
         self.within_packet_limit(transport.write_packet(connect_packet))
             .await?;
+        *connect_written = true;
 
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
         self.wait_for_connack(transport).await
+    }
+
+    async fn exchange_connect_unless_disconnected(
+        &self,
+        transport: &mut TransportType,
+    ) -> Result<crate::packet::connack::ConnAckPacket> {
+        let mut connect_written = false;
+        let exchanged = tokio::select! {
+            connack = self.exchange_connect(transport, &mut connect_written) => Some(connack),
+            () = self.disconnect_requests.requested() => None,
+        };
+        let Some(connack) = exchanged else {
+            tracing::debug!("CLIENT: Disconnect requested while waiting for CONNACK");
+            if connect_written {
+                let disconnect = Packet::Disconnect(
+                    crate::packet::disconnect::DisconnectPacket::new(ReasonCode::Success),
+                );
+                if let Err(e) = self
+                    .within_packet_limit(transport.write_packet(disconnect))
+                    .await
+                {
+                    tracing::debug!("Failed to send DISCONNECT for a cancelled connect: {e}");
+                }
+            }
+            return Err(MqttError::ConnectionError(
+                "disconnect was called while the connection was being opened".to_string(),
+            ));
+        };
+        connack
     }
 
     /// # Errors
@@ -660,15 +691,9 @@ impl DirectClientInner {
     pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
         self.reset_connection_runtime(b"reconnect").await;
 
-        let connack = tokio::select! {
-            connack = self.exchange_connect(&mut transport) => connack?,
-            () = self.disconnect_requests.requested() => {
-                tracing::debug!("CLIENT: Disconnect requested while waiting for CONNACK");
-                return Err(MqttError::ConnectionError(
-                    "disconnect was called while the connection was being opened".to_string(),
-                ));
-            }
-        };
+        let connack = self
+            .exchange_connect_unless_disconnected(&mut transport)
+            .await?;
 
         if connack.reason_code == ReasonCode::UseAnotherServer
             || connack.reason_code == ReasonCode::ServerMoved
