@@ -53,10 +53,12 @@ impl MqttClient {
         let inner = DirectClientInner::new(options);
         let connection_event_callbacks = Arc::clone(&inner.connection_event_callbacks);
         let connected = Arc::clone(&inner.connected);
+        let disconnect_requests = Arc::clone(&inner.disconnect_requests);
 
         Self {
             inner: Arc::new(RwLock::new(inner)),
             connected,
+            disconnect_requests,
             connection_event_callbacks,
             error_recovery_config: Arc::new(RwLock::new(ErrorRecoveryConfig::default())),
             connection_mutex: Arc::new(tokio::sync::Mutex::new(())),
