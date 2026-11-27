@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- **A federated JWT user's roles still authorize its subscribes after another of its connections closes** (#309). Closing one connection cleared the user's session-scoped roles, and a SUBSCRIBE on the user's other connection was then refused with Not authorized. mqtt5 0.50.0 already stopped clearing the roles when a connection ends; a test now covers the refused SUBSCRIBE.
-
 ## [mqtt5 0.51.1] - 2026-11-26
 
 ### Fixed
