@@ -2750,6 +2750,63 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn another_auth_method_after_connack_gets_disconnect_protocol_error() {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "repro-method").await;
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("Y".to_string());
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(
+            reply
+                .first()
+                .map(|(first_byte, body)| (*first_byte, body.clone())),
+            Some((0xE0, vec![0x82])),
+            "[MQTT-3.14.2-1] expected DISCONNECT 0x82, got {reply:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn reauthentication_started_again_during_one_starts_over() {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "repro-restart").await;
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("X".to_string());
+        client.send(&auth);
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(
+            reply
+                .first()
+                .map(|(first_byte, body)| (*first_byte, body.first().copied())),
+            Some((0xF0, Some(0x18))),
+            "[MQTT-4.12.1-1] expected AUTH 0x18 starting a new exchange, got {reply:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn auth_on_a_v311_connection_closes_it_without_a_disconnect() {
+        let broker = broker();
+        let client = open_with(&broker, Arc::new(Reauth));
+        client.send_raw(&v4_connect("v4-auth"));
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        client.clear();
+        client.send_raw(&[0xF0, 0x00]);
+        sleep(100).await;
+        client.send_raw(&[0xC0, 0x00]);
+        sleep(100).await;
+        assert!(
+            client.received().is_empty(),
+            "[MQTT-3.14.0-1] v3.1.1 got {:?}",
+            client.received()
+        );
+    }
+
+    #[wasm_bindgen_test]
     async fn resend_keeps_send_order_across_packet_identifier_wrap() {
         use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase};
         while js_sys::Date::now() % 1000.0 > 100.0 {
