@@ -127,7 +127,12 @@ impl ClientHandler {
     ) -> Result<()> {
         let result = self
             .auth_provider
-            .authenticate_enhanced(auth_method, auth.authentication_data(), client_id)
+            .authenticate_enhanced_from(
+                auth_method,
+                auth.authentication_data(),
+                client_id,
+                self.client_addr,
+            )
             .await?;
 
         match result.status {
@@ -182,11 +187,12 @@ impl ClientHandler {
     ) -> Result<()> {
         let result = self
             .auth_provider
-            .reauthenticate(
+            .reauthenticate_from(
                 auth_method,
                 auth.authentication_data(),
                 client_id,
                 self.user_id.as_deref(),
+                self.client_addr,
             )
             .await?;
 

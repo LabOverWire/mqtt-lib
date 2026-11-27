@@ -289,7 +289,12 @@ impl ClientHandler {
 
                 let result = self
                     .auth_provider
-                    .authenticate_enhanced(method, auth_data_prop, &connect.client_id)
+                    .authenticate_enhanced_from(
+                        method,
+                        auth_data_prop,
+                        &connect.client_id,
+                        self.client_addr,
+                    )
                     .await?;
 
                 match result.status {

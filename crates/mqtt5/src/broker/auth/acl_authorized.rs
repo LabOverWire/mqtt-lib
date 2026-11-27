@@ -92,6 +92,38 @@ impl AuthProvider for AclAuthorizedProvider {
             .reauthenticate(auth_method, auth_data, client_id, user_id)
     }
 
+    fn authenticate_enhanced_from<'a>(
+        &'a self,
+        auth_method: &'a str,
+        auth_data: Option<&'a [u8]>,
+        client_id: &'a str,
+        client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        self.authenticator.authenticate_enhanced_from(
+            auth_method,
+            auth_data,
+            client_id,
+            client_addr,
+        )
+    }
+
+    fn reauthenticate_from<'a>(
+        &'a self,
+        auth_method: &'a str,
+        auth_data: Option<&'a [u8]>,
+        client_id: &'a str,
+        user_id: Option<&'a str>,
+        client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        self.authenticator.reauthenticate_from(
+            auth_method,
+            auth_data,
+            client_id,
+            user_id,
+            client_addr,
+        )
+    }
+
     fn cleanup_session<'a>(
         &'a self,
         user_id: &'a str,

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **A provider installed with `MqttBroker::with_auth_provider` is rate limited** (see Fixed, #281). `auth_config.rate_limit` is enabled by default, so a broker with a custom provider now refuses an address or username with CONNACK 0x9F after `max_attempts` failures (5 in 60 s, locked for 300 s by default), as one built from configuration already did. `MqttBroker::auth_provider()` returns the provider without the limiter. An application that wrapped its provider in `RateLimitedAuthProvider` itself should stop doing so, or set `rate_limit.enabled` to false, or failures are counted twice.
+
+### Fixed
+
+- **The broker's authentication rate limit applies to the provider it finally uses, to enhanced authentication and to re-authentication, and its tables no longer grow without bound** (#281). The limiter wrapped only the provider built from `auth_config`, so a provider installed with `MqttBroker::with_auth_provider`, including a `CompositeAuthProvider` built around `MqttBroker::auth_provider()`, was not limited, and an application that wrapped its primary provider itself counted every fallback login as a failure. The broker now applies `auth_config.rate_limit` to whatever provider is installed last, and `MqttBroker::auth_provider()` returns that provider without the limiter, so wrapping it and installing the result is limited once. Enhanced authentication and re-authentication passed through the limiter unchecked: their failures are now counted by client address, and an address over the limit gets CONNACK or DISCONNECT 0x9F (Connection rate exceeded) without the provider being asked. `AuthRateLimiter` removed an entry only when the same address or username was checked again, so each distinct address or username that failed stayed in memory for good; entries are now removed once their window, or their lockout if they reached the limit, has passed, swept at most once per window. `AuthRateLimiter::cleanup_expired` keeps an entry that is still counting toward the limit inside its window instead of dropping it once the lockout time has passed.
+
+### Added
+
+- **`AuthProvider::authenticate_enhanced_from` and `AuthProvider::reauthenticate_from`**, which the broker calls with the client's address. By default they call `authenticate_enhanced` and `reauthenticate`, so existing providers need no change. A provider that wraps another should forward both, as `CompositeAuthProvider` now does, so that a `RateLimitedAuthProvider` inside it sees the address.
+
 ## [mqtt5 0.51.1] - 2026-11-26
 
 ### Fixed

@@ -291,6 +291,33 @@ pub trait AuthProvider: Send + Sync {
         })
     }
 
+    /// The broker's entry point for an enhanced authentication step, given the client's
+    /// address. Delegates to `authenticate_enhanced` by default. A provider that wraps another
+    /// must forward this, or the providers it wraps don't see the address.
+    fn authenticate_enhanced_from<'a>(
+        &'a self,
+        auth_method: &'a str,
+        auth_data: Option<&'a [u8]>,
+        client_id: &'a str,
+        _client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        self.authenticate_enhanced(auth_method, auth_data, client_id)
+    }
+
+    /// The broker's entry point for a re-authentication, given the client's address.
+    /// Delegates to `reauthenticate` by default. A provider that wraps another must forward
+    /// this, or the providers it wraps don't see the address.
+    fn reauthenticate_from<'a>(
+        &'a self,
+        auth_method: &'a str,
+        auth_data: Option<&'a [u8]>,
+        client_id: &'a str,
+        user_id: Option<&'a str>,
+        _client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        self.reauthenticate(auth_method, auth_data, client_id, user_id)
+    }
+
     fn cleanup_session<'a>(
         &'a self,
         _user_id: &'a str,
