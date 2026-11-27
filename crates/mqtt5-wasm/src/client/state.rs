@@ -255,14 +255,30 @@ impl ClientState {
         );
     }
 
+    pub fn release_flight(&mut self, packet_id: u16) {
+        let sequence = self.next_flight_sequence;
+        if let Some(flight) = self
+            .outbound
+            .get_mut(&packet_id)
+            .filter(|flight| !flight.released)
+        {
+            flight.released = true;
+            flight.sequence = sequence;
+            self.next_flight_sequence = sequence.wrapping_add(1);
+        }
+    }
+
     pub fn flights_in_order(&self) -> Vec<u16> {
-        let mut order: Vec<(u64, u16)> = self
+        let mut order: Vec<(bool, u64, u16)> = self
             .outbound
             .iter()
-            .map(|(packet_id, flight)| (flight.sequence, *packet_id))
+            .map(|(packet_id, flight)| (!flight.released, flight.sequence, *packet_id))
             .collect();
         order.sort_unstable();
-        order.into_iter().map(|(_, packet_id)| packet_id).collect()
+        order
+            .into_iter()
+            .map(|(_, _, packet_id)| packet_id)
+            .collect()
     }
 
     pub fn take_ack_callback(&mut self, packet_id: u16) -> Option<js_sys::Function> {

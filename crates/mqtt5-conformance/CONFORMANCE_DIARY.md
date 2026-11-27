@@ -42,6 +42,14 @@
 
 ## Diary Entries
 
+### `mqtt5-wasm` client PUBREL resend order (2026-11-26)
+
+**Trigger**: #304, the open item from the 2026-11-04 entry. After a resume the wasm client resent PUBRELs in PUBLISH order: PUBRECs received as 3, 1, 2 with 1 completed were resent as PUBREL 2, 3.
+
+**Fix**: the wasm client now follows the native `outbound_replay` order. A PUBREL takes a new place in the resend order when its first PUBREC arrives, and on resume the outstanding PUBRELs go first, in PUBREC order, then the unacknowledged PUBLISH packets in send order (MQTT-4.6.0-1 orders PUBLISH packets among themselves, MQTT-4.6.0-4 PUBRELs among themselves).
+
+**Tests** (`crates/mqtt5-wasm/tests/conformance_client.rs`): new `mqtt_4_6_0_4_resent_pubrels_follow_pubrec_order` fails on the old code (left `[2, 3]`, right `[3, 2]`). `mqtt_4_4_0_1_unacknowledged_messages_resent_on_session_resume` and `mqtt_4_4_0_1_replay_skips_messages_the_new_limits_forbid_and_quarantines_qos2` pinned the old interleaved order (PUBREL between the PUBLISH packets sent before and after it) and now expect the PUBREL first; both fail on the old code.
+
 ### Client SUT mode, phase 2: second review of `conf_client_c.rs` (2026-11-04)
 
 **Trigger**: independent reviews of PR #284 before merge. Each changed test was checked with a mutation of the mqtt5 client.

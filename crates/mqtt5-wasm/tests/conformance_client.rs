@@ -924,16 +924,16 @@ async fn mqtt_4_4_0_1_unacknowledged_messages_resent_on_session_resume() {
         frames
     };
     match &resent[0].packet {
+        Packet::PubRel(pubrel) => assert_eq!(pubrel.packet_id, ids[1]),
+        other => panic!("expected the outstanding PUBREL resent first, got {other:?}"),
+    }
+    match &resent[1].packet {
         Packet::Publish(publish) => {
             assert_eq!(publish.packet_id, Some(ids[0]));
             assert!(publish.dup, "resent PUBLISH must have DUP=1");
             assert_eq!(publish.topic_name, "a");
         }
         other => panic!("expected resent PUBLISH a, got {other:?}"),
-    }
-    match &resent[1].packet {
-        Packet::PubRel(pubrel) => assert_eq!(pubrel.packet_id, ids[1]),
-        other => panic!("expected resent PUBREL, got {other:?}"),
     }
     match &resent[2].packet {
         Packet::Publish(publish) => {
@@ -949,6 +949,63 @@ async fn mqtt_4_4_0_1_unacknowledged_messages_resent_on_session_resume() {
     settle(&first).await.unwrap();
     settle(&second).await.unwrap();
     settle(&third).await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_4_6_0_4_resent_pubrels_follow_pubrec_order() {
+    let client = Rc::new(WasmMqttClient::new("pubrel-order".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let outcomes = [
+        publish_with(&client, "a", b"1", publish_options(2)),
+        publish_with(&client, "b", b"2", publish_options(2)),
+        publish_with(&client, "c", b"3", publish_options(2)),
+    ];
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        ids.push(expect_publish(&broker).await.packet_id.unwrap());
+    }
+    let pubrec_order = [ids[2], ids[0], ids[1]];
+    for id in pubrec_order {
+        broker.send(&PubRecPacket::new(id));
+    }
+    let mut live = Vec::new();
+    for _ in 0..3 {
+        match broker.next_non_ping().await.packet {
+            Packet::PubRel(pubrel) => live.push(pubrel.packet_id),
+            other => panic!("expected PUBREL, got {other:?}"),
+        }
+    }
+    assert_eq!(live, pubrec_order, "[MQTT-4.6.0-4] live PUBRELs");
+    broker.send(&PubCompPacket::new(ids[0]));
+    sleep(50).await;
+    lose_connection(&client, &broker).await;
+
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        ConnAckPacket::new(true, ReasonCode::Success),
+    )
+    .await;
+    result.unwrap();
+    let mut resent = Vec::new();
+    for _ in 0..2 {
+        match broker.next_non_ping().await.packet {
+            Packet::PubRel(pubrel) => resent.push(pubrel.packet_id),
+            other => panic!("expected PUBREL, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        resent,
+        [ids[2], ids[1]],
+        "[MQTT-4.6.0-4] PUBRECs arrived as {pubrec_order:?} and {} completed",
+        ids[0]
+    );
+    broker.send(&PubCompPacket::new(ids[2]));
+    broker.send(&PubCompPacket::new(ids[1]));
+    for outcome in &outcomes {
+        settle(outcome).await.unwrap();
+    }
 }
 
 #[wasm_bindgen_test]
@@ -1120,6 +1177,10 @@ async fn mqtt_4_4_0_1_replay_skips_messages_the_new_limits_forbid_and_quarantine
     )
     .await;
     result.unwrap();
+    match broker.next_non_ping().await.packet {
+        Packet::PubRel(pubrel) => assert_eq!(pubrel.packet_id, released_id),
+        other => panic!("expected the PUBREL to be resent, got {other:?}"),
+    }
     let resent = broker.next_non_ping().await;
     match &resent.packet {
         Packet::Publish(publish) => {
@@ -1128,10 +1189,6 @@ async fn mqtt_4_4_0_1_replay_skips_messages_the_new_limits_forbid_and_quarantine
             assert!(publish.dup);
         }
         other => panic!("expected the conforming PUBLISH, got {other:?}"),
-    }
-    match broker.next_non_ping().await.packet {
-        Packet::PubRel(pubrel) => assert_eq!(pubrel.packet_id, released_id),
-        other => panic!("expected the PUBREL to be resent, got {other:?}"),
     }
     broker.expect_silence(60).await;
 
