@@ -12,6 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The `mqtt5` client subscribes again on a resumed session when its last resubscribe was cut off** (#353). After a connection without a session, the client sends its stored subscriptions again. When that connection closed before their SUBACKs, the next connection that the server answered with Session Present 1 restored only the local callbacks, so the server never held the subscriptions and nothing was delivered for them. The same happened after `connect_with_options` with another client identifier. The client now remembers that a resubscribe has not settled, and the next connection sends the stored subscriptions, deferred-ack ones included, whatever its Session Present says. A resubscribe stays unsettled while one of its SUBSCRIBEs was not sent or got no SUBACK; a refused one settles.
 - **A refused subscribe to a filter keeps the callback of an accepted subscription to it** (#365). A test now covers it: a second `subscribe` to a filter that the server refuses leaves the first callback in place, and it receives the filter's messages after a reconnect. The fix shipped with the change that made a failed or cancelled subscribe remove only its own callback in mqtt5 0.51.0 (see `MqttError::OutcomeUnknown` there).
 
+## [mqtt5 0.51.1] - 2026-11-26
+
+### Fixed
+
+- **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
+
+## [mqttv5-cli 0.29.13] - 2026-11-26
+
+### Fixed
+
+- **`mqttv5 bench --mode hol-blocking` sends each topic's QoS 1 and QoS 2 messages in order.** Each publish ran in a task of its own, so a topic's messages raced for the connection: in a 2 s unpaced run over a local TCP connection, 3.7% of QoS 1 and 5.8% of QoS 2 messages arrived after a later message on their topic. Each topic now writes its publishes one after another with `begin_publish` and keeps up to `--inflight` of them waiting for their acknowledgement.
+
+### Changed
+
+- Requires mqtt5 0.51.1. See mqtt5 0.51.1.
+
 ## [mqtt5 0.51.0] - 2026-11-26
 
 ### Breaking
