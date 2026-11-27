@@ -55,13 +55,13 @@ enum QuicTlsBuiltFor {
     },
 }
 
-/// A connected transport, with what its configuration was built from if it is
-/// QUIC's
 enum ConnectAttempt {
     Finished(Result<ConnectResult>),
     Failed(MqttError),
 }
 
+/// A connected transport, with what its configuration was built from if it is
+/// QUIC's
 struct Connected {
     transport: TransportType,
     #[cfg(feature = "transport-quic")]
