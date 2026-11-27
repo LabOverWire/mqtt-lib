@@ -9,8 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
 - **A bridge routes a message its remote queued to the mapping it was queued for, after a restart that reorders the incoming mappings** (#341). Each remote filter's Subscription Identifier was its position among the incoming mappings, and a remote that keeps the bridge's session queues a message with the identifier it had when the message arrived, so after a restart with the mappings in another order the message took the mapping now at that position: with `a/#` (local prefix `fromA/`) and `b/#` swapped, `a/x` reached the local broker as `fromB/a/x`. The identifier is now derived from the remote filter itself and does not depend on the order of the mappings. A message whose identifiers name no current filter, such as one queued before an upgrade to this version or under a filter no longer configured, is routed by its topic, as when the remote sends no identifiers.
+
+## [mqtt5 0.51.1] - 2026-11-26
+
+### Fixed
+
+- **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
+
+## [mqttv5-cli 0.29.13] - 2026-11-26
+
+### Fixed
+
+- **`mqttv5 bench --mode hol-blocking` sends each topic's QoS 1 and QoS 2 messages in order.** Each publish ran in a task of its own, so a topic's messages raced for the connection: in a 2 s unpaced run over a local TCP connection, 3.7% of QoS 1 and 5.8% of QoS 2 messages arrived after a later message on their topic. Each topic now writes its publishes one after another with `begin_publish` and keeps up to `--inflight` of them waiting for their acknowledgement.
+
+### Changed
+
+- Requires mqtt5 0.51.1. See mqtt5 0.51.1.
 
 ## [mqtt5 0.51.0] - 2026-11-26
 
