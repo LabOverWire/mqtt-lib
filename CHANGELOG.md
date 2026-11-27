@@ -15,8 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A subscriber that subscribes right after a retained PUBLISH gets it once** (#343). The broker stored the retained message before it matched the publish against the subscriptions, and with file persistence it wrote the message to disk in between, so a SUBSCRIBE that arrived in that time got the message as a retained message and again as a live delivery. A subscription that asks for retained messages now takes them only from what was retained before it was added, and the broker no longer routes those live to it; a retained message stored after it is routed live only. This holds in the native and wasm brokers, with and without persistence. `MessageRouter` gains `subscribe_for_retained` and `retained_messages_before` for this.
 - **The periodic storage cleanup no longer loses an inflight record written while it runs** (#362). It removed a client's inflight directory when it found it empty, and the storage writer could create its temp file in that directory just after the removal, so the write failed and a QoS 1 or 2 flow whose record was lost was not resumed after a restart. The cleanup now asks the storage writer to remove an empty directory, and the writer does it between its own writes.
+
+## [mqtt5 0.51.1] - 2026-11-26
+
+### Fixed
+
 - **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
+
+## [mqttv5-cli 0.29.13] - 2026-11-26
+
+### Fixed
+
 - **`mqttv5 bench --mode hol-blocking` sends each topic's QoS 1 and QoS 2 messages in order.** Each publish ran in a task of its own, so a topic's messages raced for the connection: in a 2 s unpaced run over a local TCP connection, 3.7% of QoS 1 and 5.8% of QoS 2 messages arrived after a later message on their topic. Each topic now writes its publishes one after another with `begin_publish` and keeps up to `--inflight` of them waiting for their acknowledgement.
+
+### Changed
+
+- Requires mqtt5 0.51.1. See mqtt5 0.51.1.
 
 ## [mqtt5 0.51.0] - 2026-11-26
 
