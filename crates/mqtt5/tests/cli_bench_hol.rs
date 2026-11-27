@@ -179,8 +179,7 @@ async fn hol_config_omits_the_new_flags_when_unset() {
     assert!(!config.contains_key("hol_subscription_streams"));
 }
 
-#[tokio::test]
-async fn unpaced_qos0_publishes_keep_each_topics_order() {
+async fn unpaced_publishes_out_of_topic_order(qos: &str) -> (usize, usize) {
     let (broker, _) = recording_broker().await;
     let trace_dir = tempfile::tempdir().unwrap();
     let trace_path = trace_dir.path().to_str().unwrap();
@@ -188,12 +187,11 @@ async fn unpaced_qos0_publishes_keep_each_topics_order() {
         broker.address(),
         "2",
         "0",
-        &["--qos", "0", "--trace-dir", trace_path],
+        &["--qos", qos, "--trace-dir", trace_path],
     )
     .await;
 
     let (_, mut rows) = trace_rows(trace_dir.path());
-    assert!(rows.len() > 1000, "too few messages traced: {}", rows.len());
     rows.sort_by_key(|row| row[3]);
     let mut highest: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
     let mut out_of_order = 0usize;
@@ -207,10 +205,38 @@ async fn unpaced_qos0_publishes_keep_each_topics_order() {
         let entry = highest.entry(topic_idx).or_insert(seq);
         *entry = (*entry).max(seq);
     }
+    (out_of_order, rows.len())
+}
+
+#[tokio::test]
+async fn unpaced_qos0_publishes_keep_each_topics_order() {
+    let (out_of_order, traced) = unpaced_publishes_out_of_topic_order("0").await;
+
+    assert!(traced > 1000, "too few messages traced: {traced}");
     assert_eq!(
-        out_of_order,
-        0,
-        "{out_of_order} of {} messages arrived after a later message on their topic",
-        rows.len()
+        out_of_order, 0,
+        "{out_of_order} of {traced} messages arrived after a later message on their topic"
+    );
+}
+
+#[tokio::test]
+async fn unpaced_qos1_publishes_keep_each_topics_order() {
+    let (out_of_order, traced) = unpaced_publishes_out_of_topic_order("1").await;
+
+    assert!(traced > 1000, "too few messages traced: {traced}");
+    assert_eq!(
+        out_of_order, 0,
+        "{out_of_order} of {traced} messages arrived after a later message on their topic"
+    );
+}
+
+#[tokio::test]
+async fn unpaced_qos2_publishes_keep_each_topics_order() {
+    let (out_of_order, traced) = unpaced_publishes_out_of_topic_order("2").await;
+
+    assert!(traced > 1000, "too few messages traced: {traced}");
+    assert_eq!(
+        out_of_order, 0,
+        "{out_of_order} of {traced} messages arrived after a later message on their topic"
     );
 }
