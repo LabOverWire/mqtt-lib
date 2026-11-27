@@ -334,7 +334,11 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
                 .as_ref()
                 .ok_or(MqttError::AuthenticationFailed)?;
 
-            let auth_method = auth.authentication_method().unwrap_or("");
+            let Some(auth_method) = auth.authentication_method() else {
+                return Err(MqttError::ProtocolError(
+                    "AUTH 0x18 without an Authentication Method".to_string(),
+                ));
+            };
             let auth_data = auth.authentication_data();
 
             let response = handler.handle_challenge(auth_method, auth_data).await?;
