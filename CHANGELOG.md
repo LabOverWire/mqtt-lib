@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
+- **`mqttv5 bench --mode hol-blocking` sends each topic's QoS 1 and QoS 2 messages in order.** Each publish ran in a task of its own, so a topic's messages raced for the connection: in a 2 s unpaced run over a local TCP connection, 3.7% of QoS 1 and 5.8% of QoS 2 messages arrived after a later message on their topic. Each topic now writes its publishes one after another with `begin_publish` and keeps up to `--inflight` of them waiting for their acknowledgement.
 
 ## [mqtt5 0.51.0] - 2026-11-26
 
