@@ -1008,6 +1008,16 @@ mod tests {
             self.inbox.borrow().clone()
         }
 
+        async fn wait_for_deliveries(&self, count: usize) -> Vec<(char, bool, Vec<u8>)> {
+            for _ in 0..300 {
+                if deliveries(&self.received()).len() >= count {
+                    break;
+                }
+                sleep(10).await;
+            }
+            deliveries(&self.received())
+        }
+
         fn received(&self) -> Vec<u8> {
             self.inbox.borrow().clone()
         }
@@ -3058,8 +3068,7 @@ mod tests {
             .collect();
         stored.sort_unstable();
         let third = start_connect(&broker, connect_options("ended", false, 3600));
-        sleep(300).await;
-        let on_third = deliveries(&third.received());
+        let on_third = third.wait_for_deliveries(3).await;
         drop(first);
         assert_eq!(
             (stored, on_third),
