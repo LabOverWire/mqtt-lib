@@ -24,7 +24,14 @@ pub struct TlsConfig {
     ///
     /// [`TlsTransport`] dials it. A wss:// connection does not use it: the
     /// WebSocket URL selects the server, so a config made by
-    /// [`WebSocketConfig::with_tls_auto`](crate::transport::websocket::WebSocketConfig::with_tls_auto)
+    #[cfg_attr(
+        feature = "transport-websocket",
+        doc = "[`WebSocketConfig::with_tls_auto`](crate::transport::websocket::WebSocketConfig::with_tls_auto)"
+    )]
+    #[cfg_attr(
+        not(feature = "transport-websocket"),
+        doc = "`WebSocketConfig::with_tls_auto`"
+    )]
     /// for a host name URL holds the unspecified address `0.0.0.0` with the
     /// URL's port, and must be given a real address before use with
     /// [`TlsTransport`].

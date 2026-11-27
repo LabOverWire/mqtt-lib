@@ -12,6 +12,7 @@ use crate::packet::publish::PublishPacket;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::time::{Duration, Instant};
 use crate::transport::tls::TlsConfig;
+use crate::transport::{certificate_name, unbracketed_host};
 use crate::types::ConnectOptions;
 use crate::types::PublishOptions;
 use crate::validation::{parse_shared_subscription, topic_matches_filter};
@@ -719,16 +720,25 @@ impl BridgeConnection {
         Ok(())
     }
 
+    async fn resolve(address: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+        let host_and_port = address
+            .rsplit_once(':')
+            .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)));
+        match host_and_port {
+            Some((host, port)) => Ok(tokio::net::lookup_host((unbracketed_host(host), port))
+                .await?
+                .collect()),
+            None => Ok(tokio::net::lookup_host(address).await?.collect()),
+        }
+    }
+
     /// Builds TLS configuration for a broker address
     fn build_tls_config(&self, address: &str, addr: std::net::SocketAddr) -> Result<TlsConfig> {
         let hostname = if let Some(ref server_name) = self.config.tls_server_name {
             server_name.clone()
         } else {
             let host = address.rsplit_once(':').map_or(address, |(host, _)| host);
-            host.strip_prefix('[')
-                .and_then(|address| address.strip_suffix(']'))
-                .unwrap_or(host)
-                .to_string()
+            certificate_name(host).to_string()
         };
 
         let mut tls_config = TlsConfig::new(addr, hostname);
@@ -864,7 +874,7 @@ impl BridgeConnection {
         address: &str,
         options: &ConnectOptions,
     ) -> std::result::Result<(), String> {
-        let addrs = tokio::net::lookup_host(address)
+        let addrs = Self::resolve(address)
             .await
             .map_err(|e| format!("Invalid address: {e}"))?;
         let mut last_error = "Could not resolve address".to_string();
@@ -1248,18 +1258,24 @@ impl BridgeConnection {
     /// connection, a QUIC one with a QUIC handshake that verifies no certificate, since it
     /// sends nothing; the failback connection that follows does.
     async fn probe_broker(address: &str, name: &str, protocols: &[BridgeProtocol]) -> bool {
-        let Ok(addrs) = tokio::net::lookup_host(address).await else {
+        let Ok(addrs) = Self::resolve(address).await else {
             return false;
         };
-        for addr in addrs {
-            for &protocol in protocols {
-                if Self::accepts(protocol, addr).await {
-                    debug!(
-                        "Bridge '{}': primary broker {} responded to probe",
-                        name, address
-                    );
-                    return true;
-                }
+        let mut probes: FuturesUnordered<_> = addrs
+            .into_iter()
+            .flat_map(|addr| {
+                protocols
+                    .iter()
+                    .map(move |&protocol| Self::accepts(protocol, addr))
+            })
+            .collect();
+        while let Some(accepted) = probes.next().await {
+            if accepted {
+                debug!(
+                    "Bridge '{}': primary broker {} responded to probe",
+                    name, address
+                );
+                return true;
             }
         }
         false
@@ -1507,6 +1523,7 @@ impl BridgeConnection {
             MqttError::Io(_)
                 | MqttError::Timeout
                 | MqttError::NotConnected
+                | MqttError::OutcomeUnknown
                 | MqttError::ConnectionError(_)
                 | MqttError::ConnectionClosedByPeer
         ) || !self.client.is_connected().await

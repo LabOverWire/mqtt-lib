@@ -20,11 +20,10 @@ use crate::protocol::v5::properties::Properties;
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::state::AckResolution;
 use crate::session::SessionState;
-use crate::transport::PacketWriter;
 use crate::validation::strip_shared_subscription_prefix;
 use crate::QoS;
 
-type WriterHandle = Arc<tokio::sync::Mutex<UnifiedWriter>>;
+type WriterHandle = Arc<UnifiedWriter>;
 type WriterSlot = Arc<tokio::sync::Mutex<Option<WriterHandle>>>;
 
 /// The reason code an unresolved token uses when it is dropped without an explicit
@@ -378,7 +377,7 @@ impl AckDispatcher {
             current.clone()
         };
         let written = match &writer {
-            Some(handle) => handle.lock().await.write_packet(packet).await.is_ok(),
+            Some(handle) => handle.send(packet).await.is_ok(),
             None => false,
         };
         if !written {
@@ -394,6 +393,7 @@ impl AckDispatcher {
 pub(crate) type AckPublishCallback = Arc<dyn Fn(PublishPacket, AckToken) + Send + Sync>;
 
 struct AckCallbackEntry {
+    id: CallbackId,
     callback: AckPublishCallback,
     topic_filter: String,
 }
@@ -411,8 +411,8 @@ struct AckDispatchItem {
 /// Delivery runs on a lazily spawned FIFO worker so the user callback never blocks
 /// the reader task (obligation 4).
 pub(crate) struct AckCallbackManager {
-    exact: Mutex<HashMap<String, AckCallbackEntry>>,
-    wildcard: Mutex<Vec<AckCallbackEntry>>,
+    exact: Mutex<HashMap<String, Vec<AckCallbackEntry>>>,
+    wildcard: Mutex<Vec<Vec<AckCallbackEntry>>>,
     next_id: AtomicU64,
     dispatch_tx: OnceLock<mpsc::UnboundedSender<AckDispatchItem>>,
 }
@@ -455,40 +455,107 @@ impl AckCallbackManager {
 
     /// Registers an ack callback for a topic filter, returning its id.
     pub(crate) fn register(&self, topic_filter: &str, callback: AckPublishCallback) -> CallbackId {
+        let id = self.push(topic_filter, callback);
+        self.settle(id);
+        id
+    }
+
+    pub(crate) fn push(&self, topic_filter: &str, callback: AckPublishCallback) -> CallbackId {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let entry = AckCallbackEntry {
+            id,
             callback,
             topic_filter: topic_filter.to_string(),
         };
         let actual = strip_shared_subscription_prefix(topic_filter).to_string();
         if actual.contains('+') || actual.contains('#') {
             let mut wildcard = self.wildcard.lock();
-            wildcard.retain(|existing| existing.topic_filter != topic_filter);
-            wildcard.push(entry);
+            match wildcard.iter_mut().find(|stack| {
+                stack
+                    .first()
+                    .is_some_and(|existing| existing.topic_filter == topic_filter)
+            }) {
+                Some(stack) => stack.push(entry),
+                None => wildcard.push(vec![entry]),
+            }
         } else {
-            self.exact.lock().insert(actual, entry);
+            self.exact.lock().entry(actual).or_default().push(entry);
         }
         id
+    }
+
+    pub(crate) fn settle(&self, id: CallbackId) {
+        let replaces = |stack: &mut Vec<AckCallbackEntry>| {
+            let Some(filter) = stack
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.topic_filter.clone())
+            else {
+                return false;
+            };
+            let replaces = stack
+                .iter()
+                .any(|entry| entry.topic_filter == filter && entry.id < id);
+            if replaces {
+                stack.retain(|entry| entry.topic_filter != filter || entry.id >= id);
+            }
+            replaces
+        };
+        self.exact.lock().values_mut().for_each(|stack| {
+            replaces(stack);
+        });
+        let mut wildcard = self.wildcard.lock();
+        if let Some(index) = wildcard.iter_mut().position(replaces) {
+            let stack = wildcard.remove(index);
+            wildcard.push(stack);
+        }
     }
 
     /// Removes the ack callback(s) for a topic filter.
     pub(crate) fn unregister(&self, topic_filter: &str) -> bool {
         let actual = strip_shared_subscription_prefix(topic_filter);
-        let removed_exact = self.exact.lock().remove(actual).is_some();
+        let mut exact = self.exact.lock();
+        let removed_exact = exact.get_mut(actual).is_some_and(|entries| {
+            let before = entries.len();
+            entries.retain(|e| e.topic_filter != topic_filter);
+            entries.len() < before
+        });
+        if exact.get(actual).is_some_and(Vec::is_empty) {
+            exact.remove(actual);
+        }
+        drop(exact);
         let mut wildcard = self.wildcard.lock();
         let before = wildcard.len();
-        wildcard.retain(|e| e.topic_filter != topic_filter);
+        wildcard.retain(|stack| {
+            stack
+                .first()
+                .is_none_or(|entry| entry.topic_filter != topic_filter)
+        });
         removed_exact || wildcard.len() < before
+    }
+
+    pub(crate) fn unregister_callback(&self, id: CallbackId) {
+        self.exact.lock().retain(|_, stack| {
+            stack.retain(|entry| entry.id != id);
+            !stack.is_empty()
+        });
+        self.wildcard.lock().retain_mut(|stack| {
+            stack.retain(|entry| entry.id != id);
+            !stack.is_empty()
+        });
     }
 
     /// Finds the single best-matching callback for a topic: an exact match wins,
     /// otherwise the first matching wildcard.
     pub(crate) fn find_one(&self, topic: &str) -> Option<AckPublishCallback> {
-        if let Some(entry) = self.exact.lock().get(topic) {
+        if let Some(entry) = self.exact.lock().get(topic).and_then(|stack| stack.last()) {
             return Some(Arc::clone(&entry.callback));
         }
         let wildcard = self.wildcard.lock();
-        for entry in wildcard.iter() {
+        for stack in wildcard.iter() {
+            let Some(entry) = stack.last() else {
+                continue;
+            };
             let filter = strip_shared_subscription_prefix(&entry.topic_filter);
             if crate::topic_matching::matches(topic, filter) {
                 return Some(Arc::clone(&entry.callback));
@@ -695,9 +762,7 @@ mod tests {
 
         dispatcher.discard_pending();
         session.read().await.clear_all_inbound_state().await;
-        *dispatcher.writer_slot.lock().await = Some(Arc::new(tokio::sync::Mutex::new(
-            UnifiedWriter::Tcp(write_half),
-        )));
+        *dispatcher.writer_slot.lock().await = Some(Arc::new(UnifiedWriter::tcp(write_half)));
 
         for request in released {
             AckDispatcher::handle(

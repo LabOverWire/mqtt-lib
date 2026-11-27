@@ -14,7 +14,6 @@ use crate::protocol::v5::properties::{Properties, PropertyId};
 use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::state::OutboundStage;
 use crate::session::{SessionState, TopicAliasManager};
-use crate::transport::PacketWriter;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,7 +48,7 @@ pub(super) struct PacketReaderContext {
     pub(super) suback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>,
     pub(super) unsuback_channels: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
     pub(super) publish_outcomes: super::tracking::SharedOutcomes,
-    pub(super) writer: Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    pub(super) writer: Arc<UnifiedWriter>,
     pub(super) lifecycle: ConnectionLifecycle,
     #[cfg(feature = "transport-quic")]
     pub(super) protocol_version: u8,
@@ -176,14 +175,14 @@ fn check_problem_information(packet: &Packet, requested: bool) -> Result<()> {
 }
 
 pub(super) async fn close_connection(
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: &Arc<UnifiedWriter>,
     lifecycle: &ConnectionLifecycle,
     error: &MqttError,
 ) {
     lifecycle.begin_close();
     let disconnect = disconnect_code_for(error)
         .map(|reason_code| Packet::Disconnect(DisconnectPacket::new(reason_code)));
-    let closing = async { writer.lock().await.close(disconnect).await };
+    let closing = writer.close(disconnect);
     match tokio::time::timeout(CLOSE_TIMEOUT, closing).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::debug!("Closing network connection: {e}"),
@@ -208,7 +207,7 @@ async fn check_acknowledgement_matches(packet: &Packet, ctx: &PacketReaderContex
         Packet::PubComp(ack) => (ack.packet_id, "PUBCOMP", &[OutboundStage::AwaitingPubComp]),
         _ => return Ok(()),
     };
-    match ctx.session.read().await.outbound_stage(packet_id).await {
+    match ctx.session.read().await.outbound_stage(packet_id) {
         Some(stage) if !accepted.contains(&stage) => Err(MqttError::ProtocolError(format!(
             "{name} for packet identifier {packet_id} which is waiting for {stage:?}"
         ))),
@@ -298,9 +297,12 @@ pub(super) async fn packet_reader_task_with_responses(
 ) {
     tracing::debug!("Packet reader task started and ready to process incoming packets");
     let failure = loop {
-        let outcome = match reader.read_packet().await {
-            Ok(packet) => process_packet(packet, &ctx).await,
-            Err(e) => Err(e),
+        let outcome = tokio::select! {
+            read = reader.read_packet() => match read {
+                Ok(packet) => process_packet(packet, &ctx).await,
+                Err(e) => Err(e),
+            },
+            failure = ctx.writer.write_failure() => Err(failure),
         };
         if let Err(e) = outcome {
             break e;
@@ -340,11 +342,7 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
             match response {
                 AuthResponse::Continue(data) => {
                     let auth_packet = AuthPacket::continue_authentication(method, Some(data))?;
-                    ctx.writer
-                        .lock()
-                        .await
-                        .write_packet(Packet::Auth(auth_packet))
-                        .await?;
+                    ctx.writer.send_detached(&Packet::Auth(auth_packet))?;
                 }
                 AuthResponse::Success => {
                     tracing::debug!("CLIENT: Auth handler indicated success for re-auth challenge");
@@ -558,9 +556,15 @@ async fn read_data_stream_packet(
 }
 
 #[cfg(feature = "transport-quic")]
-async fn end_data_stream(ctx: &PacketReaderContext, flow_id: Option<FlowId>, error: &MqttError) {
-    let fails_connection =
-        matches!(error, MqttError::ServerDisconnect(_)) || disconnect_code_for(error).is_some();
+async fn end_data_stream(
+    ctx: &PacketReaderContext,
+    flow_id: Option<FlowId>,
+    error: &MqttError,
+    write_failed: bool,
+) {
+    let fails_connection = (write_failed && !ctx.lifecycle.is_closing())
+        || matches!(error, MqttError::ServerDisconnect(_))
+        || disconnect_code_for(error).is_some();
     if !fails_connection {
         tracing::debug!(flow_id = ?flow_id, "Server QUIC data stream closed: {error}");
         return;
@@ -607,9 +611,17 @@ async fn quic_stream_reader_task(
         }
     };
 
-    let stream_writer = Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Quic(send)));
+    let stream_writer = Arc::new(UnifiedWriter::quic(send));
 
-    while let Some(read) = read_data_stream_packet(&mut recv, &mut buffer, &ctx).await {
+    loop {
+        let read = tokio::select! {
+            biased;
+            failure = stream_writer.write_failure() => Some(Err(failure)),
+            read = read_data_stream_packet(&mut recv, &mut buffer, &ctx) => read,
+        };
+        let Some(read) = read else {
+            break;
+        };
         let outcome = match read {
             Ok(packet) => {
                 tracing::trace!(flow_id = ?flow_id, "Received packet on server-initiated QUIC stream: {:?}", packet);
@@ -632,7 +644,7 @@ async fn quic_stream_reader_task(
             Err(e) => Err(e),
         };
         if let Err(e) = outcome {
-            end_data_stream(&ctx, flow_id, &e).await;
+            end_data_stream(&ctx, flow_id, &e, stream_writer.has_write_failed()).await;
             break;
         }
     }
@@ -677,7 +689,7 @@ async fn quic_uni_stream_reader_task(mut recv: quinn::RecvStream, ctx: PacketRea
             Err(e) => Err(e),
         };
         if let Err(e) = outcome {
-            end_data_stream(&ctx, flow_id, &e).await;
+            end_data_stream(&ctx, flow_id, &e, false).await;
             break;
         }
     }

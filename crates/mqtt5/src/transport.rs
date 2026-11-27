@@ -46,6 +46,24 @@ pub use tls::{TlsConfig, TlsTransport};
 pub use websocket::{RequestModifier, RequestModifierError, WebSocketConfig, WebSocketTransport};
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn unbracketed_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|address| address.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn certificate_name(host: &str) -> &str {
+    match host
+        .strip_prefix('[')
+        .and_then(|address| address.strip_suffix(']'))
+    {
+        Some(address) => address.split('%').next().unwrap_or(address),
+        None => host,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub enum TransportType {
     Tcp(TcpTransport),
     Tls(Box<TlsTransport>),
@@ -99,5 +117,32 @@ impl Transport for TransportType {
             #[cfg(feature = "transport-quic")]
             Self::Quic(t) => t.close().await,
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::{certificate_name, unbracketed_host};
+
+    #[test]
+    fn a_certificate_is_checked_against_an_ipv6_address_without_brackets_or_zone() {
+        assert_eq!(certificate_name("[::1]"), "::1");
+        assert_eq!(certificate_name("[fe80::1%1]"), "fe80::1");
+        assert_eq!(certificate_name("[fe80::1%lo0]"), "fe80::1");
+        assert_eq!(certificate_name("[fe80::1%25eth0]"), "fe80::1");
+    }
+
+    #[test]
+    fn a_certificate_is_checked_against_any_other_host_as_written() {
+        assert_eq!(certificate_name("127.0.0.1"), "127.0.0.1");
+        assert_eq!(certificate_name("broker.example.com"), "broker.example.com");
+        assert_eq!(certificate_name("odd%name"), "odd%name");
+    }
+
+    #[test]
+    fn name_resolution_takes_an_ipv6_address_with_its_zone_and_without_brackets() {
+        assert_eq!(unbracketed_host("[fe80::1%lo0]"), "fe80::1%lo0");
+        assert_eq!(unbracketed_host("[::1]"), "::1");
+        assert_eq!(unbracketed_host("localhost"), "localhost");
     }
 }

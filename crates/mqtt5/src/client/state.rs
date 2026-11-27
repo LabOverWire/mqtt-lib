@@ -9,7 +9,7 @@ use tokio::time::Duration;
 
 use super::connection::{ConnectionEvent, ReconnectConfig};
 use super::direct::{AutomaticReconnectLifecycle, DirectClientInner};
-use super::direct::{StoredSubscription, SubscriptionPersistence};
+use super::direct::{StoredSubscription, SubscriptionCallback, SubscriptionPersistence};
 use super::MqttClient;
 use crate::transport::tls::TlsConfig;
 
@@ -91,6 +91,14 @@ impl ClientTransportType {
         }
     }
 
+    pub(crate) fn opens_concurrently(&self) -> bool {
+        match self {
+            #[cfg(feature = "transport-quic")]
+            Self::Quic | Self::QuicSecure => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn dials_by_url(&self) -> bool {
         match self {
             #[cfg(feature = "transport-websocket")]
@@ -149,8 +157,9 @@ impl MqttClient {
     }
 
     /// Re-sends the SUBSCRIBE for every deferred-ack subscription after the broker reports no
-    /// session. `subscribe_with_ack` uses `SubscriptionPersistence::Skip`, so ack subscriptions
-    /// are not in `stored_subscriptions` and the regular restore path never touches them; without
+    /// session. `subscribe_with_ack` uses `SubscriptionPersistence::PersistAck`, which stores ack
+    /// subscriptions in `stored_ack_subscriptions` instead of `stored_subscriptions`, so the
+    /// regular restore path never touches them; without
     /// this, a `session_present = 0` reconnect would leave the client silently unsubscribed from
     /// its ack topics (the broker discarded the subscription with the session). The ack callback
     /// is already registered in `AckCallbackManager` and survives the disconnect, so only the
@@ -184,6 +193,17 @@ impl MqttClient {
         subscription_identifier: Option<u32>,
         callback_id: CallbackId,
     ) -> Result<()> {
+        self.resubscribe_skipping_persistence(topic, options, subscription_identifier, callback_id)
+            .await
+    }
+
+    async fn resubscribe_skipping_persistence(
+        &self,
+        topic: &str,
+        options: SubscriptionOptions,
+        subscription_identifier: Option<u32>,
+        callback_id: CallbackId,
+    ) -> Result<()> {
         let inner = self.inner.read().await;
         let mut properties = Properties::new();
         if let Some(id) = subscription_identifier {
@@ -198,9 +218,15 @@ impl MqttClient {
             properties,
             protocol_version: inner.options.protocol_version.as_u8(),
         };
-        inner
-            .subscribe_with_callback_internal(packet, callback_id, SubscriptionPersistence::Skip)
+        let sent = inner
+            .send_subscribe(
+                packet,
+                SubscriptionCallback::Restored(callback_id),
+                SubscriptionPersistence::Skip,
+            )
             .await?;
+        drop(inner);
+        sent.acknowledged().await?;
         Ok(())
     }
 
@@ -252,6 +278,13 @@ impl MqttClient {
 
             let inner = self.inner.read().await;
             if !inner.is_connected() {
+                if let Some(refusal) = inner
+                    .ended_by_server_disconnect()
+                    .filter(Self::refused_for_good)
+                {
+                    tracing::warn!("Not reconnecting: {refusal}");
+                    return Some(refusal);
+                }
                 tracing::info!(
                     "Connection monitor detected disconnection, triggering reconnection logic"
                 );
@@ -412,24 +445,8 @@ impl MqttClient {
         let _ = inner.callback_manager.restore_callback(callback_id);
         drop(inner);
 
-        let inner = self.inner.read().await;
-        let mut properties = Properties::new();
-        if let Some(id) = subscription_identifier {
-            properties.set_subscription_identifier(id);
-        }
-        let packet = SubscribePacket {
-            packet_id: 0,
-            filters: vec![crate::packet::subscribe::TopicFilter {
-                filter: topic.to_string(),
-                options,
-            }],
-            properties,
-            protocol_version: inner.options.protocol_version.as_u8(),
-        };
-        inner
-            .subscribe_with_callback_internal(packet, callback_id, SubscriptionPersistence::Skip)
-            .await?;
-        Ok(())
+        self.resubscribe_skipping_persistence(topic, options, subscription_identifier, callback_id)
+            .await
     }
 }
 

@@ -103,6 +103,10 @@ impl CallbackManager {
         topic_filter: &str,
         callback: PublishCallback,
     ) -> Result<CallbackId> {
+        Ok(self.add(topic_filter, callback))
+    }
+
+    pub(crate) fn add(&self, topic_filter: &str, callback: PublishCallback) -> CallbackId {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let entry = CallbackEntry {
@@ -115,7 +119,7 @@ impl CallbackManager {
 
         self.register_internal(topic_filter, entry);
 
-        Ok(id)
+        id
     }
 
     /// # Errors
@@ -167,6 +171,19 @@ impl CallbackManager {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unregister_callback(&self, id: CallbackId) {
+        self.callback_registry.lock().remove(&id);
+        self.wildcard_callbacks
+            .lock()
+            .retain(|entry| entry.id != id);
+        let mut exact = self.exact_callbacks.lock();
+        exact.retain(|_, entries| {
+            entries.retain(|entry| entry.id != id);
+            !entries.is_empty()
+        });
+    }
+
     #[must_use]
     pub fn unregister(&self, topic_filter: &str) -> bool {
         let actual_filter = strip_shared_subscription_prefix(topic_filter);
@@ -184,7 +201,16 @@ impl CallbackManager {
             wildcards.len() < count_before
         } else {
             let mut exact = self.exact_callbacks.lock();
-            exact.remove(actual_filter).is_some()
+            let Some(entries) = exact.get_mut(actual_filter) else {
+                return removed_from_registry;
+            };
+            let count_before = entries.len();
+            entries.retain(|entry| entry.topic_filter != topic_filter);
+            let removed = entries.len() < count_before;
+            if entries.is_empty() {
+                exact.remove(actual_filter);
+            }
+            removed
         };
 
         removed_from_registry || removed_from_callbacks
@@ -388,7 +414,6 @@ mod tests {
             counter2_clone.fetch_add(2, Ordering::Relaxed);
         });
 
-        // Register both callbacks for same topic
         manager.register("test/topic", callback1).unwrap();
         manager.register("test/topic", callback2).unwrap();
 
@@ -462,7 +487,7 @@ mod tests {
         assert_eq!(manager.callback_count(), 2);
 
         manager.register("test/exact", callback).unwrap();
-        assert_eq!(manager.callback_count(), 3); // Multiple callbacks for same topic
+        assert_eq!(manager.callback_count(), 3);
 
         manager.clear();
         assert_eq!(manager.callback_count(), 0);

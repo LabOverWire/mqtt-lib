@@ -22,8 +22,9 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
-use crate::callback::{CallbackId, CallbackManager};
+use crate::callback::{CallbackId, CallbackManager, PublishCallback};
 use crate::client::auth_handler::{AuthHandler, AuthResponse};
+use crate::client::connection::DisconnectReason;
 use crate::client::publish_outcome::{
     Delivery, IndeterminateReason, PublishHandle, PublishOutcome, PublishRejection, PublishResult,
 };
@@ -42,8 +43,8 @@ use crate::protocol::v5::reason_codes::ReasonCode;
 use crate::session::flow_control::FlowControlManager;
 use crate::session::state::OutboundReplay;
 use crate::session::subscription::Subscription;
-use crate::session::SessionState;
-use crate::transport::{PacketIo, PacketWriter, TransportType};
+use crate::session::{SessionState, TopicAliasManager};
+use crate::transport::{PacketIo, TransportType};
 use crate::types::{ConnectOptions, ConnectResult, PublishOptions};
 use crate::QoS;
 
@@ -52,12 +53,17 @@ use crate::telemetry::propagation;
 #[cfg(feature = "transport-quic")]
 use crate::transport::flow::{FlowFlags, FlowId};
 #[cfg(feature = "transport-quic")]
+use crate::transport::quic_stream_manager::{
+    packet_size, CommittedPacket, DataStream, PreparedStream,
+};
+#[cfg(feature = "transport-quic")]
 use crate::transport::QuicStreamManager;
 #[cfg(feature = "transport-quic")]
 use crate::transport::StreamStrategy;
 #[cfg(feature = "transport-quic")]
 use quinn::{Connection, Endpoint};
 
+pub(crate) use unified::{Flush, RoomReservation};
 pub use unified::{UnifiedReader, UnifiedWriter};
 
 const SIZE_PROBE_PACKET_ID: u16 = 1;
@@ -83,6 +89,7 @@ pub enum AutomaticReconnectLifecycle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SubscriptionPersistence {
     Persist,
+    PersistAck,
     Skip,
 }
 
@@ -173,6 +180,239 @@ impl Drop for QuotaClaim {
 pub(crate) enum Transmitted {
     Written(Written),
     Restaged(Box<ReadyPublish>),
+    Flushing(PendingFlush, Delivery),
+}
+
+pub(crate) type PendingFlush =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+
+pub(crate) enum SubscriptionCallback {
+    Restored(CallbackId),
+    Plain(Arc<CallbackManager>, PublishCallback),
+    Ack(Arc<AckCallbackManager>, ack::AckPublishCallback),
+}
+
+enum RegisteredCallback {
+    Restored,
+    Plain(Arc<CallbackManager>),
+    Ack(Arc<AckCallbackManager>),
+}
+
+struct SubscribeUndo {
+    callback: RegisteredCallback,
+    callback_id: CallbackId,
+    pending: Option<(SharedSubacks, u16)>,
+    stored: Option<(StoredSubscriptions, Vec<String>)>,
+    armed: bool,
+}
+
+impl SubscribeUndo {
+    fn register(callback: SubscriptionCallback, topic_filter: &str) -> Self {
+        let (callback, callback_id) = match callback {
+            SubscriptionCallback::Restored(callback_id) => {
+                (RegisteredCallback::Restored, callback_id)
+            }
+            SubscriptionCallback::Plain(callbacks, callback) => {
+                let callback_id = callbacks.add(topic_filter, callback);
+                (RegisteredCallback::Plain(callbacks), callback_id)
+            }
+            SubscriptionCallback::Ack(callbacks, callback) => {
+                let callback_id = callbacks.push(topic_filter, callback);
+                (RegisteredCallback::Ack(callbacks), callback_id)
+            }
+        };
+        Self {
+            callback,
+            callback_id,
+            pending: None,
+            stored: None,
+            armed: true,
+        }
+    }
+
+    fn keep(mut self) {
+        self.armed = false;
+        if let RegisteredCallback::Ack(callbacks) = &self.callback {
+            callbacks.settle(self.callback_id);
+        }
+    }
+}
+
+impl Drop for SubscribeUndo {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match &self.callback {
+            RegisteredCallback::Restored => {}
+            RegisteredCallback::Plain(callbacks) => callbacks.unregister_callback(self.callback_id),
+            RegisteredCallback::Ack(callbacks) => callbacks.unregister_callback(self.callback_id),
+        }
+        if let Some((pending, packet_id)) = &self.pending {
+            pending.lock().remove(packet_id);
+        }
+        if let Some((stored, filters)) = &self.stored {
+            stored.lock().retain(|(topic, _, _, callback_id)| {
+                *callback_id != self.callback_id || !filters.contains(topic)
+            });
+        }
+    }
+}
+
+type SharedSubacks = Arc<Mutex<HashMap<u16, oneshot::Sender<SubAckPacket>>>>;
+
+pub(crate) struct SubscribeSent {
+    written: PendingFlush,
+    suback: oneshot::Receiver<SubAckPacket>,
+    packet: SubscribePacket,
+    undo: SubscribeUndo,
+    session: Arc<tokio::sync::RwLock<SessionState>>,
+}
+
+impl SubscribeSent {
+    pub(crate) fn callback_id(&self) -> CallbackId {
+        self.undo.callback_id
+    }
+
+    pub(crate) async fn acknowledged(self) -> Result<Vec<(u16, QoS)>> {
+        let Self {
+            written,
+            suback,
+            packet,
+            undo,
+            session,
+        } = self;
+        let suback = acknowledgement(written, suback).await?;
+        if suback.reason_codes.is_empty() {
+            return Err(MqttError::ProtocolError(
+                "No results returned for subscription".to_string(),
+            ));
+        }
+
+        for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
+            if let Some(subscription) =
+                DirectClientInner::create_subscription_from_filter(filter, *reason_code)
+            {
+                let recorded = session
+                    .write()
+                    .await
+                    .add_subscription(filter.filter.clone(), subscription)
+                    .await;
+                if let Err(e) = recorded {
+                    tracing::warn!(filter = %filter.filter, error = %e, "subscription not recorded in session");
+                }
+            }
+        }
+
+        let granted = suback
+            .reason_codes
+            .iter()
+            .map(|reason_code| {
+                reason_code
+                    .granted_qos()
+                    .map(|qos| (packet.packet_id, qos))
+                    .ok_or(MqttError::SubscriptionDenied(*reason_code))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        undo.keep();
+        Ok(granted)
+    }
+}
+
+pub(crate) struct UnsubscribeSent {
+    written: PendingFlush,
+    unsuback: oneshot::Receiver<UnsubAckPacket>,
+    packet: UnsubscribePacket,
+    pending_unsubacks: Arc<Mutex<HashMap<u16, oneshot::Sender<UnsubAckPacket>>>>,
+    session: Arc<tokio::sync::RwLock<SessionState>>,
+}
+
+impl UnsubscribeSent {
+    pub(crate) async fn acknowledged(self) -> Result<()> {
+        let packet_id = self.packet.packet_id;
+        let acknowledged = acknowledgement(self.written, self.unsuback).await;
+        if acknowledged.is_err() {
+            self.pending_unsubacks.lock().remove(&packet_id);
+        }
+
+        for filter in &self.packet.filters {
+            let removed = self.session.write().await.remove_subscription(filter).await;
+            if let Err(e) = removed {
+                tracing::warn!(filter = %filter, error = %e, "subscription not removed from session");
+            }
+        }
+
+        let unsuback = acknowledged?;
+        if unsuback.packet_id == packet_id {
+            Ok(())
+        } else {
+            Err(MqttError::ProtocolError(format!(
+                "UNSUBACK packet ID mismatch: expected {packet_id}, got {}",
+                unsuback.packet_id
+            )))
+        }
+    }
+}
+
+async fn acknowledgement<T>(written: PendingFlush, ack: oneshot::Receiver<T>) -> Result<T> {
+    if written.await.is_err() {
+        return Err(MqttError::OutcomeUnknown);
+    }
+    match tokio::time::timeout(ACKNOWLEDGEMENT_WAIT, ack).await {
+        Ok(Ok(ack)) => Ok(ack),
+        Ok(Err(_)) => Err(MqttError::OutcomeUnknown),
+        Err(_) => Err(MqttError::Timeout),
+    }
+}
+
+enum PublishTarget {
+    #[cfg(feature = "transport-quic")]
+    Datagram(RoomReservation),
+    #[cfg(feature = "transport-quic")]
+    Data(PreparedStream),
+    Control(RoomReservation),
+}
+
+enum CommitTarget {
+    #[cfg(feature = "transport-quic")]
+    Data(PreparedStream),
+    Control(RoomReservation),
+}
+
+impl CommitTarget {
+    fn commit_then(self, packet: &Packet, committed: impl FnOnce()) -> Result<PendingFlush> {
+        match self {
+            #[cfg(feature = "transport-quic")]
+            Self::Data(prepared) => prepared
+                .commit_then(packet, committed)
+                .map(|committed| -> PendingFlush { Box::pin(committed.send()) }),
+            Self::Control(room) => {
+                let writer = Arc::clone(room.writer());
+                let end = room.commit_then(packet, committed)?;
+                Ok(Box::pin(Flush::new(&writer, end).wait()))
+            }
+        }
+    }
+}
+
+enum CommittedPublish {
+    #[cfg(feature = "transport-quic")]
+    Sent,
+    #[cfg(feature = "transport-quic")]
+    Data(CommittedPacket),
+    Control(Flush),
+}
+
+impl CommittedPublish {
+    async fn flushed(self) -> Result<()> {
+        match self {
+            #[cfg(feature = "transport-quic")]
+            Self::Sent => Ok(()),
+            #[cfg(feature = "transport-quic")]
+            Self::Data(committed) => committed.send().await,
+            Self::Control(flush) => flush.wait().await,
+        }
+    }
 }
 
 pub(crate) enum Written {
@@ -237,7 +477,7 @@ pub struct SessionStateOwner {
 }
 
 pub struct DirectClientInner {
-    pub writer: Option<Arc<tokio::sync::Mutex<UnifiedWriter>>>,
+    pub writer: Option<Arc<UnifiedWriter>>,
     #[cfg(feature = "transport-quic")]
     pub quic_connection: Option<Arc<Connection>>,
     #[cfg(feature = "transport-quic")]
@@ -251,6 +491,7 @@ pub struct DirectClientInner {
     pub session: Arc<tokio::sync::RwLock<SessionState>>,
     pub session_state_owner: SessionStateOwner,
     pub connected: Arc<AtomicBool>,
+    last_disconnect_reason: Arc<Mutex<Option<DisconnectReason>>>,
     pub connection_event_callbacks:
         Arc<tokio::sync::RwLock<Vec<crate::client::ConnectionEventCallback>>>,
     pub connection_epoch: ConnectionEpoch,
@@ -295,6 +536,50 @@ pub struct DirectClientInner {
     pub cached_quic_client_config: Option<quinn::ClientConfig>,
     #[cfg(feature = "transport-quic")]
     pub zero_rtt_accepted: bool,
+    pub(crate) disconnect_requests: Arc<DisconnectRequests>,
+}
+
+pub(crate) struct DisconnectRequests {
+    waiting: watch::Sender<usize>,
+}
+
+impl DisconnectRequests {
+    fn new() -> Self {
+        Self {
+            waiting: watch::channel(0).0,
+        }
+    }
+
+    pub(crate) fn begin(self: &Arc<Self>) -> DisconnectRequest {
+        self.waiting.send_modify(|waiting| *waiting += 1);
+        DisconnectRequest {
+            requests: Arc::clone(self),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> bool {
+        *self.waiting.borrow() > 0
+    }
+
+    async fn requested(&self) {
+        let mut waiting = self.waiting.subscribe();
+        while *waiting.borrow_and_update() == 0 {
+            if waiting.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+pub(crate) struct DisconnectRequest {
+    requests: Arc<DisconnectRequests>,
+}
+
+impl Drop for DisconnectRequest {
+    fn drop(&mut self) {
+        self.requests.waiting.send_modify(|waiting| *waiting -= 1);
+    }
 }
 
 impl DirectClientInner {
@@ -332,6 +617,7 @@ impl DirectClientInner {
                 resumed: false,
             },
             connected: Arc::new(AtomicBool::new(false)),
+            last_disconnect_reason: Arc::new(Mutex::new(None)),
             connection_event_callbacks: Arc::new(tokio::sync::RwLock::new(Vec::new())),
             connection_epoch: Arc::new(AtomicU64::new(0)),
             callback_manager: Arc::new(CallbackManager::new()),
@@ -372,6 +658,18 @@ impl DirectClientInner {
             cached_quic_client_config: None,
             #[cfg(feature = "transport-quic")]
             zero_rtt_accepted: false,
+            disconnect_requests: Arc::new(DisconnectRequests::new()),
+        }
+    }
+
+    async fn unless_disconnecting<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::select! {
+            biased;
+            result = operation => result,
+            () = self.disconnect_requests.requested() => Err(MqttError::NotConnected),
         }
     }
 
@@ -381,6 +679,23 @@ impl DirectClientInner {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn forget_disconnect_reason(&self) -> Option<DisconnectReason> {
+        self.last_disconnect_reason.lock().take()
+    }
+
+    pub(crate) fn restore_disconnect_reason(&self, reason: Option<DisconnectReason>) {
+        *self.last_disconnect_reason.lock() = reason;
+    }
+
+    pub(crate) fn ended_by_server_disconnect(&self) -> Option<MqttError> {
+        match *self.last_disconnect_reason.lock() {
+            Some(DisconnectReason::ServerDisconnect(reason_code)) => {
+                Some(MqttError::ServerDisconnect(reason_code))
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn subscription_identifiers_available(&self) -> bool {
@@ -439,13 +754,17 @@ impl DirectClientInner {
         drop(self.outbound_transfer.lock().await);
         self.stop_background_tasks().await;
         self.keepalive_state.lock().reset();
+        self.pending_subacks.lock().clear();
+        self.pending_unsubacks.lock().clear();
 
         #[cfg(feature = "transport-quic")]
         if let Some(manager) = self.quic_stream_manager.take() {
-            manager.close_all_streams().await;
+            manager.close_all_streams();
         }
 
-        self.writer = None;
+        if let Some(writer) = self.writer.take() {
+            writer.discard();
+        }
         self.ack_dispatcher.clear_writer().await;
 
         #[cfg(feature = "transport-quic")]
@@ -616,7 +935,7 @@ impl DirectClientInner {
 
         let receive_maximum = self.apply_server_capabilities(&connack).await?;
         self.apply_negotiated_capabilities(&connack).await;
-        let replay_items = self.session.read().await.outbound_replay().await;
+        let replay_items = self.session.read().await.outbound_replay();
         let replay_slots = self.reset_send_quota(receive_maximum, &replay_items).await;
 
         let protocol_version = self.options.protocol_version.as_u8();
@@ -625,14 +944,14 @@ impl DirectClientInner {
                 let (r, w) = tcp.into_split()?;
                 (
                     UnifiedReader::tcp(r, protocol_version),
-                    UnifiedWriter::Tcp(w),
+                    UnifiedWriter::tcp(w),
                 )
             }
             TransportType::Tls(tls) => {
                 let (r, w) = (*tls).into_split()?;
                 (
                     UnifiedReader::tls(r, protocol_version),
-                    UnifiedWriter::Tls(w),
+                    UnifiedWriter::tls(w),
                 )
             }
             #[cfg(feature = "transport-websocket")]
@@ -640,7 +959,7 @@ impl DirectClientInner {
                 let (r, w) = (*ws).into_split()?;
                 (
                     UnifiedReader::websocket(r, protocol_version),
-                    UnifiedWriter::WebSocket(w),
+                    UnifiedWriter::websocket(w),
                 )
             }
             #[cfg(feature = "transport-quic")]
@@ -663,20 +982,21 @@ impl DirectClientInner {
                 ));
                 (
                     UnifiedReader::quic(split.recv, protocol_version),
-                    UnifiedWriter::QuicControl(split.send, conn_arc),
+                    UnifiedWriter::quic_control(split.send, conn_arc),
                 )
             }
         };
 
         let reader = reader.with_maximum_packet_size(self.options.properties.maximum_packet_size);
         let connection_epoch = self.advance_connection_epoch();
-        let writer_arc = Arc::new(tokio::sync::Mutex::new(writer));
+        let writer_arc = Arc::new(writer);
         self.ack_dispatcher
             .set_writer(Arc::clone(&writer_arc))
             .await;
         let replay_writer = Arc::downgrade(&writer_arc);
         self.writer = Some(writer_arc);
         self.connection_alive = Some(Arc::new(watch::channel(true).0));
+        self.restore_disconnect_reason(None);
         self.set_connected(true);
 
         tracing::debug!("Starting background tasks (packet reader and keepalive)");
@@ -699,7 +1019,7 @@ impl DirectClientInner {
         &self,
         items: Vec<OutboundReplay>,
         slots: Arc<tokio::sync::Semaphore>,
-        writer: std::sync::Weak<tokio::sync::Mutex<UnifiedWriter>>,
+        writer: std::sync::Weak<UnifiedWriter>,
         epoch: u64,
     ) -> SessionReplay {
         SessionReplay {
@@ -784,8 +1104,8 @@ impl DirectClientInner {
     async fn discard_session_state(&self) {
         let session = self.session.write().await;
         self.ack_dispatcher.discard_pending();
-        let unacknowledged = session.outbound_replay().await;
-        session.discard_outbound_state().await;
+        let unacknowledged = session.outbound_replay();
+        session.discard_outbound_state();
         self.requeue_lost_session(unacknowledged);
         session.flow_control().read().await.clear_inbound().await;
         if session.clear_all_inbound_state().await {
@@ -897,7 +1217,6 @@ impl DirectClientInner {
         let flow = Arc::clone(self.session.read().await.flow_control());
         let mut flow = flow.write().await;
         flow.reset_for_connection(receive_maximum, &retained_in_flight, replay)
-            .await
     }
 
     fn publish_policy(&self) -> PublishPolicy {
@@ -965,7 +1284,12 @@ impl DirectClientInner {
     ///
     /// Returns an error if the client is not connected, no auth handler is set,
     /// or no authentication method was used during initial connection
-    pub async fn reauthenticate(&self) -> Result<()> {
+    pub(crate) async fn send_reauthenticate(&self) -> Result<PendingFlush> {
+        self.unless_disconnecting(self.commit_reauthenticate())
+            .await
+    }
+
+    async fn commit_reauthenticate(&self) -> Result<PendingFlush> {
         if !self.is_connected() {
             return Err(MqttError::NotConnected);
         }
@@ -983,17 +1307,13 @@ impl DirectClientInner {
         let auth_packet = AuthPacket::re_authenticate(method.clone(), initial_data)?;
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::Auth(auth_packet))
-            .await?;
+        let written = Self::commit_on(writer, &Packet::Auth(auth_packet))?;
 
         tracing::debug!(
             "CLIENT: Initiated re-authentication with method: {}",
             method
         );
-        Ok(())
+        Ok(written)
     }
 
     /// # Errors
@@ -1026,7 +1346,7 @@ impl DirectClientInner {
                     ReasonCode::Success,
                 ))
             });
-            if let Err(e) = writer.lock().await.close(disconnect).await {
+            if let Err(e) = writer.close(disconnect).await {
                 tracing::debug!("Closing network connection on disconnect: {e}");
             }
         }
@@ -1122,7 +1442,6 @@ impl DirectClientInner {
                         || self.pending_unsubacks.lock().contains_key(&packet_id)
                         || self.outbound_ids.lock().holds(packet_id)
                 })
-                .await
                 .ok_or(MqttError::PacketIdExhausted)?;
             if let Some(reservation) = IdReservation::claim(&self.outbound_ids, packet_id) {
                 return Ok(reservation);
@@ -1141,15 +1460,15 @@ impl DirectClientInner {
         self.session.read().await.check_packet_size(buf.len()).await
     }
 
-    async fn check_packet_fits(&self, packet: &impl MqttPacket) -> Result<()> {
+    async fn encoded_size_within_limit(&self, packet: &impl MqttPacket) -> Result<usize> {
         let mut buf = bytes::BytesMut::new();
         packet.encode(&mut buf)?;
-        self.session.read().await.check_packet_size(buf.len()).await
-    }
-
-    pub(crate) async fn check_unsubscribe(&self, packet: &UnsubscribePacket) -> Result<()> {
-        outbound::check_unsubscribe(packet)?;
-        self.check_packet_fits(packet).await
+        self.session
+            .read()
+            .await
+            .check_packet_size(buf.len())
+            .await?;
+        Ok(buf.len())
     }
 
     pub(super) async fn release_outbound_quota(
@@ -1169,7 +1488,7 @@ impl DirectClientInner {
         flow: &Arc<tokio::sync::RwLock<FlowControlManager>>,
         packet_id: u16,
     ) {
-        if let Err(e) = flow.read().await.acknowledge(packet_id).await {
+        if let Err(e) = flow.read().await.acknowledge(packet_id) {
             tracing::trace!(packet_id, "No send quota held: {e}");
         }
     }
@@ -1270,16 +1589,12 @@ impl DirectClientInner {
         let mut claim = claim.and_then(|claim| claim.for_generation(quota_generation));
 
         if !self.is_connected() {
-            if let Some(claim) = claim {
-                claim.release().await;
-            }
+            Self::release_unsent_quota(&flow, claim, None).await;
             return Err(MqttError::NotConnected);
         }
 
         if ready.epoch != self.connection_epoch.load(Ordering::SeqCst) {
-            if let Some(claim) = claim {
-                claim.release().await;
-            }
+            Self::release_unsent_quota(&flow, claim, None).await;
             tracing::debug!(
                 packet_id = ?packet_id,
                 "Connection changed before publish was sent; conforming it to the current connection"
@@ -1298,23 +1613,25 @@ impl DirectClientInner {
         } = *ready;
         let qos = publish.qos;
 
+        let target = match self.prepare_publish(&publish).await {
+            Ok(target) => target,
+            Err(e) => {
+                Self::release_unsent_quota(
+                    &flow,
+                    claim,
+                    packet_id.filter(|_| qos != QoS::AtMostOnce),
+                )
+                .await;
+                return Err(e);
+            }
+        };
+        let mut aliases = self.outbound_aliases(&request).await;
+
         let in_flight = match packet_id {
             Some(pid) if qos != QoS::AtMostOnce => {
-                let stored = match self.with_aliased_topic(publish.clone()).await {
-                    Ok(stored) => {
-                        self.session
-                            .read()
-                            .await
-                            .store_unacked_publish(stored)
-                            .await
-                    }
-                    Err(e) => Err(e),
-                };
+                let stored = self.store_for_resend(&publish, aliases.as_deref()).await;
                 if let Err(e) = stored {
-                    match claim {
-                        Some(claim) => claim.release().await,
-                        None => Self::release_send_quota(&flow, pid).await,
-                    }
+                    Self::release_unsent_quota(&flow, claim, Some(pid)).await;
                     return Err(e);
                 }
                 if let Some(claim) = claim.take() {
@@ -1338,7 +1655,7 @@ impl DirectClientInner {
             );
         }
 
-        let alias_mapping = request
+        let alias_definition = request
             .topic_alias()
             .filter(|_| !request.topic_name.is_empty())
             .map(|alias| (alias, request.topic_name));
@@ -1346,14 +1663,34 @@ impl DirectClientInner {
             .connection_alive
             .as_ref()
             .map_or_else(|| watch::channel(false).1, |alive| alive.subscribe());
-        let written = self.send_publish_packet(publish).await;
-        if let Some((alias, alias_topic)) = alias_mapping.filter(|_| written.is_ok()) {
-            self.record_outbound_topic_alias(alias, &alias_topic).await;
-        }
+        let committed =
+            self.commit_publish(publish, target, alias_definition, aliases.as_deref_mut());
+        drop(aliases);
+        self.finish_transmit(committed, in_flight, link, Delivery::of(qos, packet_id))
+            .await
+    }
+
+    async fn finish_transmit(
+        &self,
+        committed: Result<CommittedPublish>,
+        in_flight: Option<PublishHandle>,
+        link: watch::Receiver<bool>,
+        delivery: Delivery,
+    ) -> Result<Transmitted> {
+        let mut flushing: PendingFlush = match committed {
+            Ok(committed) => Box::pin(committed.flushed()),
+            Err(e) => Box::pin(std::future::ready(Err(e))),
+        };
+        let written = tokio::select! {
+            biased;
+            written = &mut flushing => written,
+            () = self.disconnect_requests.requested() => match in_flight {
+                None => return Ok(Transmitted::Flushing(flushing, delivery)),
+                Some(_) => Err(MqttError::NotConnected),
+            },
+        };
         match (written, in_flight) {
-            (Ok(()), None) => Ok(Transmitted::Written(Written::Sent(Delivery::of(
-                qos, packet_id,
-            )))),
+            (Ok(()), None) => Ok(Transmitted::Written(Written::Sent(delivery))),
             (Ok(()), Some(handle)) => Ok(Transmitted::Written(Written::InFlight(InFlight {
                 handle,
                 link,
@@ -1361,20 +1698,12 @@ impl DirectClientInner {
             (Err(e), None) => Err(e),
             (Err(e), Some(handle)) => {
                 tracing::debug!(
-                    packet_id = ?packet_id,
+                    ?delivery,
                     error = %e,
                     "Stored PUBLISH could not be written; it is re-sent with the session"
                 );
                 Ok(Transmitted::Written(Written::Detached(handle)))
             }
-        }
-    }
-
-    async fn record_outbound_topic_alias(&self, alias: u16, topic: &str) {
-        let session = self.session.read().await;
-        let mut aliases = session.topic_alias_out().write().await;
-        if let Err(e) = aliases.register_alias(alias, topic) {
-            tracing::warn!(alias, topic, error = %e, "outbound Topic Alias not recorded");
         }
     }
 
@@ -1398,71 +1727,133 @@ impl DirectClientInner {
         Ok((final_payload, properties))
     }
 
-    async fn send_publish_packet(&self, publish: PublishPacket) -> Result<()> {
-        #[cfg(feature = "transport-quic")]
-        {
-            let qos = publish.qos;
-            if qos == QoS::AtMostOnce && self.datagrams_available() {
-                if let Some(max_size) = self.max_datagram_size() {
-                    let overhead = 5 + publish.topic_name.len();
-                    if publish.payload.len() + overhead <= max_size {
-                        let mut buf = bytes::BytesMut::new();
-                        crate::transport::packet_io::encode_packet_to_buffer(
-                            &Packet::Publish(publish.clone()),
-                            &mut buf,
-                        )?;
-                        if buf.len() <= max_size && self.send_datagram(buf.freeze()).is_ok() {
-                            tracing::debug!(
-                                topic = %publish.topic_name,
-                                payload_len = publish.payload.len(),
-                                "Sent QoS 0 PUBLISH via QUIC datagram"
-                            );
-                            return Ok(());
-                        }
-                    }
-                }
-            }
+    async fn release_unsent_quota(
+        flow: &Arc<tokio::sync::RwLock<FlowControlManager>>,
+        claim: Option<QuotaClaim>,
+        packet_id: Option<u16>,
+    ) {
+        match (claim, packet_id) {
+            (Some(claim), _) => claim.release().await,
+            (None, Some(pid)) => Self::release_send_quota(flow, pid).await,
+            (None, None) => {}
+        }
+    }
 
+    async fn outbound_aliases(
+        &self,
+        request: &PublishPacket,
+    ) -> Option<tokio::sync::OwnedRwLockWriteGuard<TopicAliasManager>> {
+        request.topic_alias()?;
+        let table = Arc::clone(self.session.read().await.topic_alias_out());
+        Some(table.write_owned().await)
+    }
+
+    async fn store_for_resend(
+        &self,
+        publish: &PublishPacket,
+        aliases: Option<&TopicAliasManager>,
+    ) -> Result<()> {
+        let stored = outbound::resolve_topic_alias(publish.clone(), aliases)?;
+        self.session
+            .read()
+            .await
+            .store_unacked_publish(stored)
+            .await
+    }
+
+    async fn prepare_publish(&self, publish: &PublishPacket) -> Result<PublishTarget> {
+        self.unless_disconnecting(self.publish_target(publish))
+            .await
+    }
+
+    async fn publish_target(&self, publish: &PublishPacket) -> Result<PublishTarget> {
+        #[cfg(feature = "transport-quic")]
+        let datagram = self.fits_datagram(publish);
+        #[cfg(feature = "transport-quic")]
+        if !datagram {
             if let Some(manager) = &self.quic_stream_manager {
-                match manager.strategy() {
-                    StreamStrategy::DataPerPublish => {
-                        tracing::debug!(
-                            topic = %publish.topic_name,
-                            qos = ?qos,
-                            "Using dedicated QUIC stream for PUBLISH (DataPerPublish)"
-                        );
-                        manager
-                            .send_packet_on_stream(Packet::Publish(publish))
-                            .await?;
-                        return Ok(());
-                    }
-                    StreamStrategy::ControlOnly => {}
-                    topic_strategy => {
-                        tracing::debug!(
-                            topic = %publish.topic_name,
-                            qos = ?qos,
-                            strategy = ?topic_strategy,
-                            "Using topic-specific QUIC stream for PUBLISH"
-                        );
-                        manager
-                            .send_on_topic_stream(
-                                publish.topic_name.clone(),
-                                Packet::Publish(publish),
-                            )
-                            .await?;
-                        return Ok(());
-                    }
+                let target = match manager.strategy() {
+                    StreamStrategy::ControlOnly => None,
+                    StreamStrategy::DataPerPublish => Some(DataStream::Dedicated),
+                    _ => Some(DataStream::Topic(publish.topic_name.clone())),
+                };
+                if let Some(target) = target {
+                    return manager
+                        .prepare(&target, packet_size(&Packet::Publish(publish.clone())))
+                        .await
+                        .map(PublishTarget::Data);
                 }
             }
         }
+        let writer = Arc::clone(self.writer.as_ref().ok_or(MqttError::NotConnected)?);
+        let room = writer.reserve_room(publish.body_encoded_size() + 5).await;
+        #[cfg(feature = "transport-quic")]
+        if datagram {
+            return Ok(PublishTarget::Datagram(room));
+        }
+        Ok(PublishTarget::Control(room))
+    }
 
-        let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
-        writer
-            .lock()
-            .await
-            .write_packet(Packet::Publish(publish))
-            .await?;
-        Ok(())
+    #[cfg(feature = "transport-quic")]
+    fn fits_datagram(&self, publish: &PublishPacket) -> bool {
+        publish.qos == QoS::AtMostOnce
+            && self.datagrams_available()
+            && self.max_datagram_size().is_some_and(|max_size| {
+                publish.payload.len() + 5 + publish.topic_name.len() <= max_size
+            })
+    }
+
+    fn commit_publish(
+        &self,
+        publish: PublishPacket,
+        target: PublishTarget,
+        definition: Option<(u16, String)>,
+        aliases: Option<&mut TopicAliasManager>,
+    ) -> Result<CommittedPublish> {
+        let record_alias = move || {
+            if let (Some((alias, topic)), Some(aliases)) = (definition, aliases) {
+                if let Err(e) = aliases.register_alias(alias, &topic) {
+                    tracing::warn!(alias, topic, error = %e, "outbound Topic Alias not recorded");
+                }
+            }
+        };
+        match target {
+            #[cfg(feature = "transport-quic")]
+            PublishTarget::Datagram(room) => {
+                let mut buf = bytes::BytesMut::new();
+                crate::transport::packet_io::encode_packet_to_buffer(
+                    &Packet::Publish(publish.clone()),
+                    &mut buf,
+                )?;
+                let fits = self
+                    .max_datagram_size()
+                    .is_some_and(|max_size| buf.len() <= max_size);
+                if fits && self.send_datagram(buf.freeze()).is_ok() {
+                    record_alias();
+                    tracing::debug!(
+                        topic = %publish.topic_name,
+                        payload_len = publish.payload.len(),
+                        "Sent QoS 0 PUBLISH via QUIC datagram"
+                    );
+                    return Ok(CommittedPublish::Sent);
+                }
+                let writer = Arc::clone(room.writer());
+                let end = room.commit_then(&Packet::Publish(publish), record_alias)?;
+                Ok(CommittedPublish::Control(Flush::new(&writer, end)))
+            }
+            #[cfg(feature = "transport-quic")]
+            PublishTarget::Data(prepared) => {
+                tracing::debug!(topic = %publish.topic_name, "Using a QUIC data stream for PUBLISH");
+                prepared
+                    .commit_then(&Packet::Publish(publish), record_alias)
+                    .map(CommittedPublish::Data)
+            }
+            PublishTarget::Control(room) => {
+                let writer = Arc::clone(room.writer());
+                let end = room.commit_then(&Packet::Publish(publish), record_alias)?;
+                Ok(CommittedPublish::Control(Flush::new(&writer, end)))
+            }
+        }
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1476,7 +1867,7 @@ impl DirectClientInner {
     }
 
     #[cfg(feature = "transport-quic")]
-    async fn unsubscribe_data_flow_manager(
+    fn unsubscribe_data_flow_manager(
         &self,
         packet: &UnsubscribePacket,
     ) -> Option<&Arc<QuicStreamManager>> {
@@ -1484,7 +1875,7 @@ impl DirectClientInner {
             return None;
         };
         let manager = self.topic_stream_manager()?;
-        manager.get_flow_id_for_topic(filter).await.map(|_| manager)
+        manager.get_flow_id_for_topic(filter).map(|_| manager)
     }
 
     #[cfg(feature = "transport-quic")]
@@ -1564,206 +1955,180 @@ impl DirectClientInner {
         }
     }
 
-    async fn wait_for_suback(
-        &self,
-        rx: oneshot::Receiver<SubAckPacket>,
-        packet_id: u16,
-    ) -> Result<SubAckPacket> {
-        let timeout = Duration::from_secs(10);
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(suback)) => Ok(suback),
-            Ok(Err(_)) => Err(MqttError::ProtocolError(
-                "SUBACK channel closed".to_string(),
-            )),
-            Err(_) => {
-                self.pending_subacks.lock().remove(&packet_id);
-                Err(MqttError::Timeout)
-            }
-        }
-    }
-
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn subscribe_with_callback(
+    pub(crate) async fn send_subscribe(
         &self,
         packet: SubscribePacket,
-        callback_id: CallbackId,
-    ) -> Result<Vec<(u16, QoS)>> {
-        self.subscribe_with_callback_internal(packet, callback_id, SubscriptionPersistence::Persist)
+        callback: SubscriptionCallback,
+        persistence: SubscriptionPersistence,
+    ) -> Result<SubscribeSent> {
+        self.unless_disconnecting(self.commit_subscribe(packet, callback, persistence))
             .await
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub(crate) async fn subscribe_with_callback_internal(
+    async fn commit_subscribe(
         &self,
         packet: SubscribePacket,
-        callback_id: CallbackId,
+        callback: SubscriptionCallback,
         persistence: SubscriptionPersistence,
-    ) -> Result<Vec<(u16, QoS)>> {
+    ) -> Result<SubscribeSent> {
         if !self.is_connected() {
             return Err(MqttError::NotConnected);
         }
 
         self.server_capabilities.check_subscribe(&packet)?;
-        self.check_packet_fits(&packet).await?;
+        let size = self.encoded_size_within_limit(&packet).await?;
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let reservation = self.allocate_packet_id().await?;
-        let packet_id = reservation.packet_id();
-        let mut packet = packet;
-        packet.packet_id = packet_id;
-
-        let (tx, rx) = oneshot::channel();
-        self.pending_subacks.lock().insert(packet_id, tx);
-        drop(reservation);
-
-        maybe_store_subscriptions(
-            &self.stored_subscriptions,
-            &packet.filters,
-            packet.properties.get_subscription_identifier(),
-            callback_id,
-            persistence,
-        );
-
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if let Some(manager) = self.subscribe_data_flow_manager(&packet) {
-            let topic = packet.filters[0].filter.clone();
-            manager
-                .send_on_topic_stream(topic, Packet::Subscribe(packet.clone()))
-                .await?;
-            true
-        } else {
-            false
+        let target = match self.subscribe_data_flow_manager(&packet) {
+            Some(manager) => CommitTarget::Data(
+                manager
+                    .prepare(&DataStream::Topic(packet.filters[0].filter.clone()), 0)
+                    .await?,
+            ),
+            None => CommitTarget::Control(writer.reserve_room(size).await),
         };
         #[cfg(not(feature = "transport-quic"))]
-        let sent_on_flow = false;
+        let target = CommitTarget::Control(writer.reserve_room(size).await);
 
-        if !sent_on_flow {
-            writer
-                .lock()
-                .await
-                .write_packet(Packet::Subscribe(packet.clone()))
-                .await?;
-        }
+        let reservation = self.allocate_packet_id().await?;
+        let mut packet = packet;
+        packet.packet_id = reservation.packet_id();
 
-        let suback = self.wait_for_suback(rx, packet_id).await?;
+        let topic_filter = packet
+            .filters
+            .first()
+            .ok_or_else(|| {
+                MqttError::ProtocolError("SUBSCRIBE without a topic filter".to_string())
+            })?
+            .filter
+            .clone();
+        let (tx, rx) = oneshot::channel();
+        self.pending_subacks.lock().insert(packet.packet_id, tx);
+        drop(reservation);
 
-        for (filter, reason_code) in packet.filters.iter().zip(suback.reason_codes.iter()) {
-            if let Some(subscription) = Self::create_subscription_from_filter(filter, *reason_code)
-            {
-                let recorded = self
-                    .session
-                    .write()
-                    .await
-                    .add_subscription(filter.filter.clone(), subscription)
-                    .await;
-                if let Err(e) = recorded {
-                    tracing::warn!(filter = %filter.filter, error = %e, "subscription not recorded in session");
-                }
+        let stored_subscriptions = if persistence == SubscriptionPersistence::PersistAck {
+            &self.stored_ack_subscriptions
+        } else {
+            &self.stored_subscriptions
+        };
+        let mut registered = None;
+        let committed = target.commit_then(&Packet::Subscribe(packet.clone()), || {
+            let mut undo = SubscribeUndo::register(callback, &topic_filter);
+            undo.pending = Some((Arc::clone(&self.pending_subacks), packet.packet_id));
+            maybe_store_subscriptions(
+                stored_subscriptions,
+                &packet.filters,
+                packet.properties.get_subscription_identifier(),
+                undo.callback_id,
+                persistence,
+            );
+            if persistence != SubscriptionPersistence::Skip {
+                undo.stored = Some((
+                    Arc::clone(stored_subscriptions),
+                    packet
+                        .filters
+                        .iter()
+                        .map(|filter| filter.filter.clone())
+                        .collect(),
+                ));
             }
-        }
-
-        let mut results: Vec<(u16, QoS)> = Vec::with_capacity(suback.reason_codes.len());
-
-        for rc in &suback.reason_codes {
-            if let Some(qos) = rc.granted_qos() {
-                results.push((packet_id, qos));
-            } else {
-                return Err(MqttError::SubscriptionDenied(*rc));
+            registered = Some(undo);
+        });
+        let (written, undo) = match (committed, registered) {
+            (Ok(written), Some(undo)) => (written, undo),
+            (Ok(_), None) => {
+                self.pending_subacks.lock().remove(&packet.packet_id);
+                return Err(MqttError::InvalidState(
+                    "SUBSCRIBE committed without registering its callback".to_string(),
+                ));
             }
-        }
+            (Err(e), _) => {
+                self.pending_subacks.lock().remove(&packet.packet_id);
+                return Err(e);
+            }
+        };
 
-        Ok(results)
+        Ok(SubscribeSent {
+            written,
+            suback: rx,
+            packet,
+            undo,
+            session: Arc::clone(&self.session),
+        })
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn unsubscribe(&self, packet: UnsubscribePacket) -> Result<()> {
+    fn commit_on(writer: &Arc<UnifiedWriter>, packet: &Packet) -> Result<PendingFlush> {
+        let end = writer.commit(packet)?;
+        Ok(Box::pin(Flush::new(writer, end).wait()))
+    }
+
+    pub(crate) async fn send_unsubscribe(
+        &self,
+        packet: UnsubscribePacket,
+    ) -> Result<UnsubscribeSent> {
+        self.unless_disconnecting(self.commit_unsubscribe(packet))
+            .await
+    }
+
+    async fn commit_unsubscribe(&self, packet: UnsubscribePacket) -> Result<UnsubscribeSent> {
         if !self.is_connected() {
             return Err(MqttError::NotConnected);
         }
 
-        self.check_unsubscribe(&packet).await?;
+        outbound::check_unsubscribe(&packet)?;
+        let size = self.encoded_size_within_limit(&packet).await?;
 
         let writer = self.writer.as_ref().ok_or(MqttError::NotConnected)?;
 
-        let reservation = self.allocate_packet_id().await?;
-        let packet_id = reservation.packet_id();
-        let mut packet = packet;
-        packet.packet_id = packet_id;
-
-        let (tx, rx) = oneshot::channel();
-        self.pending_unsubacks.lock().insert(packet_id, tx);
-        drop(reservation);
-
-        {
-            let mut stored = self.stored_subscriptions.lock();
-            for topic in &packet.filters {
-                stored.retain(|(stored_topic, _, _, _)| stored_topic != topic);
-            }
-        }
-
         #[cfg(feature = "transport-quic")]
-        let sent_on_flow = if let Some(manager) = self.unsubscribe_data_flow_manager(&packet).await
-        {
-            let topic = packet.filters[0].clone();
-            manager
-                .send_on_topic_stream(topic, Packet::Unsubscribe(packet.clone()))
-                .await?;
-            true
-        } else {
-            false
+        let target = match self.unsubscribe_data_flow_manager(&packet) {
+            Some(manager) => CommitTarget::Data(
+                manager
+                    .prepare(&DataStream::Topic(packet.filters[0].clone()), 0)
+                    .await?,
+            ),
+            None => CommitTarget::Control(writer.reserve_room(size).await),
         };
         #[cfg(not(feature = "transport-quic"))]
-        let sent_on_flow = false;
+        let target = CommitTarget::Control(writer.reserve_room(size).await);
 
-        if !sent_on_flow {
-            writer
-                .lock()
-                .await
-                .write_packet(Packet::Unsubscribe(packet.clone()))
-                .await?;
-        }
+        let reservation = self.allocate_packet_id().await?;
+        let mut packet = packet;
+        packet.packet_id = reservation.packet_id();
 
-        let timeout = Duration::from_secs(10);
-        let unsuback = match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(unsuback)) => unsuback,
-            Ok(Err(_)) => {
-                return Err(MqttError::ProtocolError(
-                    "UNSUBACK channel closed".to_string(),
-                ))
+        let (tx, rx) = oneshot::channel();
+        self.pending_unsubacks.lock().insert(packet.packet_id, tx);
+        drop(reservation);
+
+        let committed = target.commit_then(&Packet::Unsubscribe(packet.clone()), || {
+            for topic in &packet.filters {
+                self.stored_subscriptions
+                    .lock()
+                    .retain(|(stored_topic, _, _, _)| stored_topic != topic);
+                self.stored_ack_subscriptions
+                    .lock()
+                    .retain(|(stored_topic, _, _, _)| stored_topic != topic);
+                let _ = self.callback_manager.unregister(topic);
+                let _ = self.ack_callbacks.unregister(topic);
             }
-            Err(_) => {
-                self.pending_unsubacks.lock().remove(&packet_id);
-                return Err(MqttError::Timeout);
+        });
+        let written = match committed {
+            Ok(written) => written,
+            Err(e) => {
+                self.pending_unsubacks.lock().remove(&packet.packet_id);
+                return Err(e);
             }
         };
 
-        if unsuback.packet_id != packet_id {
-            return Err(MqttError::ProtocolError(format!(
-                "UNSUBACK packet ID mismatch: expected {}, got {}",
-                packet_id, unsuback.packet_id
-            )));
-        }
-
-        for filter in packet.filters {
-            let removed = self
-                .session
-                .write()
-                .await
-                .remove_subscription(&filter)
-                .await;
-            if let Err(e) = removed {
-                tracing::warn!(filter = %filter, error = %e, "subscription not removed from session");
-            }
-        }
-
-        Ok(())
+        Ok(UnsubscribeSent {
+            written,
+            unsuback: rx,
+            packet,
+            pending_unsubacks: Arc::clone(&self.pending_unsubacks),
+            session: Arc::clone(&self.session),
+        })
     }
 
     /// The CONNECT for this attempt, refused before it is sent if it can't be encoded: for good
@@ -1870,6 +2235,7 @@ impl DirectClientInner {
     ) -> Result<keepalive::ConnectionLifecycle> {
         Ok(keepalive::ConnectionLifecycle {
             connected: self.connected.clone(),
+            last_disconnect_reason: Arc::clone(&self.last_disconnect_reason),
             connection_epoch,
             current_connection_epoch: self.connection_epoch.clone(),
             callbacks: Arc::clone(&self.connection_event_callbacks),
@@ -2293,7 +2659,13 @@ pub mod tests {
             protocol_version: 5,
         };
 
-        let result = client.subscribe_with_callback(packet, 0).await;
+        let result = client
+            .send_subscribe(
+                packet,
+                SubscriptionCallback::Restored(0),
+                SubscriptionPersistence::Persist,
+            )
+            .await;
         assert!(matches!(result, Err(MqttError::NotConnected)));
     }
 
@@ -2331,7 +2703,7 @@ pub mod tests {
             protocol_version: 5,
         };
 
-        let result = client.unsubscribe(packet).await;
+        let result = client.send_unsubscribe(packet).await;
         assert!(matches!(result, Err(MqttError::NotConnected)));
     }
 
@@ -2491,7 +2863,7 @@ pub mod tests {
         let mut restages = 0;
         loop {
             match client.transmit_publish(ready, claim).await.unwrap() {
-                Transmitted::Written(_) => return restages,
+                Transmitted::Written(_) | Transmitted::Flushing(..) => return restages,
                 Transmitted::Restaged(next) => {
                     restages += 1;
                     claim = claim_quota(client, &next).await;
@@ -2523,7 +2895,7 @@ pub mod tests {
         assert!(connect_to(&mut client, addr).await);
 
         assert_eq!(send_with_claim(&client, b, stale_claim).await, 1);
-        assert_eq!(flow.read().await.in_flight_count().await, 1);
+        assert_eq!(flow.read().await.in_flight_count(), 1);
 
         let Ok(StagedPublish::Ready(c)) = client
             .stage_publish("t/c".into(), b"c".to_vec(), qos(QoS::AtLeastOnce))
@@ -2596,7 +2968,6 @@ pub mod tests {
             .read()
             .await
             .get_unacked_publishes()
-            .await
             .iter()
             .filter_map(|publish| publish.packet_id)
             .collect()
@@ -2631,10 +3002,10 @@ pub mod tests {
             "setup: a flushed, b waits for quota"
         );
         let stale_writer = Arc::clone(client.writer.as_ref().unwrap());
-        let held = stale_writer.lock().await;
+        let held = stale_writer.hold_transport().await;
         let flow = Arc::clone(client.session.read().await.flow_control());
         let a = unacked_packet_ids(&client).await[0];
-        flow.read().await.acknowledge(a).await.unwrap();
+        flow.read().await.acknowledge(a).unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         assert!(connect_to(&mut client, addr).await);
@@ -2893,7 +3264,7 @@ pub mod tests {
 
         assert!(connect_to(&mut client, addr).await);
         let replaced_writer = Arc::clone(client.writer.as_ref().unwrap());
-        let held = replaced_writer.lock().await;
+        let held = replaced_writer.hold_transport().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(connect_to(&mut client, addr).await);
         drop(held);
@@ -3140,7 +3511,7 @@ pub mod tests {
         drop(held);
         tokio::time::sleep(Duration::from_millis(20)).await;
         let flow = Arc::clone(client.session.read().await.flow_control());
-        assert_eq!(flow.read().await.in_flight_count().await, 0);
+        assert_eq!(flow.read().await.in_flight_count(), 0);
         assert_eq!(flow.read().await.available_permits(), 1);
     }
 
@@ -3158,15 +3529,7 @@ pub mod tests {
         };
         let packet_id = ready.packet_id().unwrap();
         let claim = claim_quota(&client, &ready).await;
-        client
-            .writer
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .close(None)
-            .await
-            .unwrap();
+        client.writer.as_ref().unwrap().close(None).await.unwrap();
 
         let transmitted = client.transmit_publish(ready, claim).await;
         let Ok(Transmitted::Written(Written::Detached(handle))) = transmitted else {
@@ -3465,7 +3828,7 @@ pub mod tests {
             "an error PUBREC for an identifier already released with PUBREL is a protocol error"
         );
         assert_eq!(
-            client.session.read().await.outbound_stage(packet_id).await,
+            client.session.read().await.outbound_stage(packet_id),
             Some(crate::session::state::OutboundStage::AwaitingPubComp),
             "the PUBREL state must be left untouched"
         );

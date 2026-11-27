@@ -309,7 +309,10 @@ fn deliver_message(
     let rust_subscriptions = state.borrow().rust_subscriptions.clone();
 
     for (filter, callback) in &subscriptions {
-        if mqtt5_protocol::validation::topic_matches_filter(topic, filter) {
+        if mqtt5_protocol::validation::topic_matches_filter(
+            topic,
+            mqtt5_protocol::strip_shared_subscription_prefix(filter),
+        ) {
             let topic_js = JsValue::from_str(topic);
             let payload_array = js_sys::Uint8Array::from(decoded_payload.as_slice());
             let props_js: WasmMessageProperties = properties.clone().into();
@@ -326,7 +329,10 @@ fn deliver_message(
     }
 
     for (filter, callback) in &rust_subscriptions {
-        if mqtt5_protocol::validation::topic_matches_filter(topic, filter) {
+        if mqtt5_protocol::validation::topic_matches_filter(
+            topic,
+            mqtt5_protocol::strip_shared_subscription_prefix(filter),
+        ) {
             let msg = RustMessage {
                 topic: topic.to_string(),
                 payload: decoded_payload.clone(),

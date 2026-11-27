@@ -20,7 +20,8 @@ pub(crate) type QueueWriter = Arc<WriteBehind>;
 /// Sequence numbers start high so a front re-queue always has room below the oldest entry.
 pub const SEQ_FLOOR: u64 = 1 << 62;
 
-/// Bounds on one client's queue; the oldest entries are dropped when either is exceeded.
+/// Bounds on one client's queue; the oldest entries whose delivery has not started are dropped
+/// when either is exceeded.
 #[derive(Debug, Clone, Copy)]
 pub struct QueueLimits {
     pub max_messages: usize,
@@ -41,6 +42,7 @@ struct QueueEntry {
     seq: u64,
     bytes: usize,
     expires_at: Option<SystemTime>,
+    started: bool,
     body: Option<Arc<QueuedMessage>>,
     path: Option<PathBuf>,
 }
@@ -228,7 +230,8 @@ impl ClientQueue {
         self.epoch.load(Ordering::Acquire)
     }
 
-    /// Appends a message. Drops the oldest entries first when a limit is exceeded.
+    /// Appends a message. Drops the oldest entries whose delivery has not started first when a
+    /// limit is exceeded.
     pub fn push(&self, message: QueuedMessage) -> PushOutcome {
         let appended = self.append(&mut self.inner.lock(), Arc::new(message));
         self.release_evicted(appended)
@@ -251,6 +254,7 @@ impl ClientQueue {
             seq,
             bytes: entry_bytes(&body),
             expires_at: body.deadline(),
+            started: body.dup,
             body: Some(Arc::clone(&body)),
             path: None,
         };
@@ -378,6 +382,7 @@ impl ClientQueue {
                 seq: first + index as u64,
                 bytes: entry_bytes(body),
                 expires_at: body.deadline(),
+                started: body.dup,
                 body: Some(Arc::clone(body)),
                 path: None,
             });
@@ -488,6 +493,7 @@ impl ClientQueue {
             seq,
             bytes,
             expires_at,
+            started: message.dup,
             body: None,
             path: Some(path),
         });
@@ -503,8 +509,9 @@ impl ClientQueue {
         self.enforce_limits_dir(inner, false)
     }
 
-    /// Drops entries until the queue is within its limits. `keep_front` drops from the back
-    /// (the newest messages) instead of the front, so a `requeue_front` of unacknowledged
+    /// Drops entries until the queue is within its limits: the oldest whose delivery has not
+    /// started, or the oldest when every delivery has. `keep_front` drops from the back
+    /// (the newest messages) instead, so a `requeue_front` of unacknowledged
     /// in-flight messages keeps those and sheds newer overflow rather than the reverse.
     fn enforce_limits_dir(&self, inner: &mut QueueInner, keep_front: bool) -> Vec<QueueEntry> {
         let mut evicted = Vec::new();
@@ -514,7 +521,12 @@ impl ClientQueue {
             let dropped = if keep_front {
                 inner.entries.pop_back()
             } else {
-                inner.entries.pop_front()
+                let oldest_unstarted = inner
+                    .entries
+                    .iter()
+                    .position(|entry| !entry.started)
+                    .unwrap_or(0);
+                inner.entries.remove(oldest_unstarted)
             };
             let Some(dropped) = dropped else {
                 break;
@@ -721,6 +733,27 @@ mod tests {
         assert!(!queue.behind());
         assert!(queue.take(1).await.is_empty());
         assert!(!queue.behind(), "an empty take does not start a drain");
+    }
+
+    #[tokio::test]
+    async fn push_over_the_byte_limit_keeps_a_started_resend() {
+        let mut resend = message("c", "resend");
+        resend.packet_id = Some(1);
+        resend.dup = true;
+        let registry = registry(QueueLimits {
+            max_messages: usize::MAX,
+            max_bytes: entry_bytes(&resend) + entry_bytes(&message("c", "n1")),
+        });
+        let queue = registry.handle("c");
+        queue.requeue_front(vec![resend]);
+        for tag in ["n1", "n2"] {
+            queue.push(message("c", tag));
+        }
+        let taken = queue.take(10).await;
+        assert_eq!(
+            taken.iter().map(|m| m.topic.as_str()).collect::<Vec<_>>(),
+            ["t/resend", "t/n2"]
+        );
     }
 
     #[tokio::test]

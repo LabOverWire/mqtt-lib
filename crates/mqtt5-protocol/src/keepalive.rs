@@ -1,15 +1,10 @@
 use crate::numeric::u128_to_u64_saturating;
 use crate::time::Duration;
 
-pub const DEFAULT_LOCK_RETRY_ATTEMPTS: u32 = 100;
-pub const DEFAULT_LOCK_RETRY_DELAY_MS: u32 = 50;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeepaliveConfig {
     pub ping_interval_percent: u8,
     pub timeout_percent: u8,
-    pub lock_retry_attempts: u32,
-    pub lock_retry_delay_ms: u32,
 }
 
 impl Default for KeepaliveConfig {
@@ -17,8 +12,6 @@ impl Default for KeepaliveConfig {
         Self {
             ping_interval_percent: 75,
             timeout_percent: 150,
-            lock_retry_attempts: DEFAULT_LOCK_RETRY_ATTEMPTS,
-            lock_retry_delay_ms: DEFAULT_LOCK_RETRY_DELAY_MS,
         }
     }
 }
@@ -29,8 +22,6 @@ impl KeepaliveConfig {
         Self {
             ping_interval_percent,
             timeout_percent,
-            lock_retry_attempts: DEFAULT_LOCK_RETRY_ATTEMPTS,
-            lock_retry_delay_ms: DEFAULT_LOCK_RETRY_DELAY_MS,
         }
     }
 
@@ -39,16 +30,7 @@ impl KeepaliveConfig {
         Self {
             ping_interval_percent: 50,
             timeout_percent: 150,
-            lock_retry_attempts: DEFAULT_LOCK_RETRY_ATTEMPTS,
-            lock_retry_delay_ms: DEFAULT_LOCK_RETRY_DELAY_MS,
         }
-    }
-
-    #[must_use]
-    pub const fn with_lock_retry(mut self, attempts: u32, delay_ms: u32) -> Self {
-        self.lock_retry_attempts = attempts;
-        self.lock_retry_delay_ms = delay_ms;
-        self
     }
 
     #[must_use]
