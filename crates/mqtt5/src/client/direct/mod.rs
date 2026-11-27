@@ -539,34 +539,59 @@ pub struct DirectClientInner {
     pub(crate) disconnect_requests: Arc<DisconnectRequests>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct PendingDisconnects {
+    all: usize,
+    graceful: usize,
+}
+
 pub(crate) struct DisconnectRequests {
-    waiting: watch::Sender<usize>,
+    waiting: watch::Sender<PendingDisconnects>,
 }
 
 impl DisconnectRequests {
     fn new() -> Self {
         Self {
-            waiting: watch::channel(0).0,
+            waiting: watch::channel(PendingDisconnects::default()).0,
         }
     }
 
     pub(crate) fn begin(self: &Arc<Self>) -> DisconnectRequest {
-        self.waiting.send_modify(|waiting| *waiting += 1);
+        self.start(true)
+    }
+
+    pub(crate) fn begin_abnormal(self: &Arc<Self>) -> DisconnectRequest {
+        self.start(false)
+    }
+
+    fn start(self: &Arc<Self>, graceful: bool) -> DisconnectRequest {
+        self.waiting.send_modify(|pending| {
+            pending.all += 1;
+            pending.graceful += usize::from(graceful);
+        });
         DisconnectRequest {
             requests: Arc::clone(self),
+            graceful,
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn pending(&self) -> bool {
-        *self.waiting.borrow() > 0
+        self.waiting.borrow().all > 0
     }
 
     async fn requested(&self) {
+        self.requested_graceful().await;
+    }
+
+    async fn requested_graceful(&self) -> bool {
         let mut waiting = self.waiting.subscribe();
-        while *waiting.borrow_and_update() == 0 {
+        loop {
+            let pending = *waiting.borrow_and_update();
+            if pending.all > 0 {
+                return pending.graceful > 0;
+            }
             if waiting.changed().await.is_err() {
-                return;
+                return true;
             }
         }
     }
@@ -574,11 +599,15 @@ impl DisconnectRequests {
 
 pub(crate) struct DisconnectRequest {
     requests: Arc<DisconnectRequests>,
+    graceful: bool,
 }
 
 impl Drop for DisconnectRequest {
     fn drop(&mut self) {
-        self.requests.waiting.send_modify(|waiting| *waiting -= 1);
+        self.requests.waiting.send_modify(|pending| {
+            pending.all -= 1;
+            pending.graceful -= usize::from(self.graceful);
+        });
     }
 }
 
@@ -903,20 +932,103 @@ impl DirectClientInner {
         }
     }
 
-    /// # Errors
-    ///
-    /// Returns an error if the operation fails
-    pub async fn connect(&mut self, mut transport: TransportType) -> Result<ConnectResult> {
-        self.reset_connection_runtime(b"reconnect").await;
-
+    async fn exchange_connect(
+        &self,
+        transport: &mut TransportType,
+        connect_written: &mut bool,
+    ) -> Result<crate::packet::connack::ConnAckPacket> {
         let connect_packet = self.sendable_connect_packet().await?;
 
         self.within_packet_limit(transport.write_packet(connect_packet))
             .await?;
+        *connect_written = true;
 
         tracing::debug!("CLIENT: Waiting for CONNACK or AUTH");
 
-        let connack = self.wait_for_connack(&mut transport).await?;
+        self.wait_for_connack(transport).await
+    }
+
+    async fn exchange_connect_unless_disconnected(
+        &self,
+        mut transport: TransportType,
+    ) -> Result<(crate::packet::connack::ConnAckPacket, TransportType)> {
+        let mut connect_written = false;
+        let exchanged = tokio::select! {
+            connack = self.exchange_connect(&mut transport, &mut connect_written) => Ok(connack),
+            graceful = self.disconnect_requests.requested_graceful() => Err(graceful),
+        };
+        match exchanged {
+            Ok(connack) => Ok((connack?, transport)),
+            Err(graceful) => Err(self
+                .close_cancelled_connect(transport, connect_written && graceful)
+                .await),
+        }
+    }
+
+    async fn close_cancelled_connect(
+        &self,
+        transport: TransportType,
+        say_goodbye: bool,
+    ) -> MqttError {
+        tracing::debug!("CLIENT: Disconnect requested while waiting for CONNACK");
+        let farewell = say_goodbye.then(|| {
+            Packet::Disconnect(crate::packet::disconnect::DisconnectPacket::new(
+                ReasonCode::Success,
+            ))
+        });
+        match transport {
+            #[cfg(feature = "transport-quic")]
+            TransportType::Quic(quic) => match (*quic).into_split() {
+                Ok(split) => {
+                    let writer =
+                        UnifiedWriter::quic_control(split.send, Arc::new(split.connection));
+                    if let Err(e) = self.within_packet_limit(writer.close(farewell)).await {
+                        tracing::debug!("Failed to close a cancelled QUIC connect: {e}");
+                    }
+                    let endpoint = split.endpoint;
+                    tokio::spawn(async move {
+                        if tokio::time::timeout(
+                            std::time::Duration::from_secs(2),
+                            endpoint.wait_idle(),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::debug!("QUIC endpoint of a cancelled connect not idle in 2 s");
+                        }
+                    });
+                }
+                Err(e) => tracing::debug!("Failed to split a cancelled QUIC connect: {e}"),
+            },
+            mut other => {
+                if let Some(disconnect) = farewell {
+                    if let Err(e) = self
+                        .within_packet_limit(other.write_packet(disconnect))
+                        .await
+                    {
+                        tracing::debug!("Failed to send DISCONNECT for a cancelled connect: {e}");
+                    }
+                }
+                if let Err(e) = self
+                    .within_packet_limit(crate::Transport::close(&mut other))
+                    .await
+                {
+                    tracing::debug!("Failed to close a cancelled connect: {e}");
+                }
+            }
+        }
+        MqttError::ConnectionError(
+            "disconnect was called while the connection was being opened".to_string(),
+        )
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails
+    pub async fn connect(&mut self, transport: TransportType) -> Result<ConnectResult> {
+        self.reset_connection_runtime(b"reconnect").await;
+
+        let (connack, mut transport) = self.exchange_connect_unless_disconnected(transport).await?;
 
         if connack.reason_code == ReasonCode::UseAnotherServer
             || connack.reason_code == ReasonCode::ServerMoved

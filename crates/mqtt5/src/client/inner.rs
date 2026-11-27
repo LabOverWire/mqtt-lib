@@ -55,6 +55,11 @@ enum QuicTlsBuiltFor {
     },
 }
 
+enum ConnectAttempt {
+    Finished(Result<ConnectResult>),
+    Failed(MqttError),
+}
+
 /// A connected transport, with what its configuration was built from if it is
 /// QUIC's
 struct Connected {
@@ -738,6 +743,49 @@ impl MqttClient {
         (addr, opened)
     }
 
+    async fn connect_opened(&self, connected: Connected) -> ConnectAttempt {
+        let mut inner = self.inner.write().await;
+        if let Err(e) = Self::check_not_disconnected(&inner) {
+            return ConnectAttempt::Finished(Err(e));
+        }
+        match inner.connect(connected.transport).await {
+            Ok(result) => {
+                inner.reconnect_attempt = 0;
+                #[cfg(feature = "transport-quic")]
+                if let (Some(cached), Some(built_for)) = (
+                    inner.cached_quic_client_config.take(),
+                    connected.quic_built_for,
+                ) {
+                    *self.quic_client_config.write().await = Some((built_for, cached));
+                }
+                let stored_subs = inner.stored_subscriptions.lock().clone();
+                let session_state_resumed = inner.session_state_owner.resumed;
+                let keep_alive = inner.negotiated_keep_alive();
+                drop(inner);
+                self.on_successful_connect(
+                    stored_subs,
+                    result.session_present,
+                    session_state_resumed,
+                    keep_alive,
+                )
+                .await;
+                ConnectAttempt::Finished(Ok(result))
+            }
+            Err(e)
+                if inner.disconnect_requests.pending()
+                    || matches!(
+                        e,
+                        MqttError::ConnectionRefused(
+                            ReasonCode::UseAnotherServer | ReasonCode::ServerMoved
+                        )
+                    ) =>
+            {
+                ConnectAttempt::Finished(Err(e))
+            }
+            Err(e) => ConnectAttempt::Failed(e),
+        }
+    }
+
     pub(crate) async fn try_connect_to_addresses(
         &self,
         addresses: &[std::net::SocketAddr],
@@ -803,44 +851,9 @@ impl MqttClient {
                 continue;
             };
 
-            let mut inner = self.inner.write().await;
-            Self::check_not_disconnected(&inner)?;
-            match inner.connect(connected.transport).await {
-                Ok(result) => {
-                    inner.reconnect_attempt = 0;
-                    #[cfg(feature = "transport-quic")]
-                    if let (Some(cached), Some(built_for)) = (
-                        inner.cached_quic_client_config.take(),
-                        connected.quic_built_for,
-                    ) {
-                        *self.quic_client_config.write().await = Some((built_for, cached));
-                    }
-                    let stored_subs = inner.stored_subscriptions.lock().clone();
-                    let session_present = result.session_present;
-                    let session_state_resumed = inner.session_state_owner.resumed;
-                    let keep_alive = inner.negotiated_keep_alive();
-                    drop(inner);
-
-                    self.on_successful_connect(
-                        stored_subs,
-                        session_present,
-                        session_state_resumed,
-                        keep_alive,
-                    )
-                    .await;
-
-                    return Ok(result);
-                }
-                Err(
-                    e @ MqttError::ConnectionRefused(
-                        ReasonCode::UseAnotherServer | ReasonCode::ServerMoved,
-                    ),
-                ) => {
-                    drop(inner);
-                    return Err(e);
-                }
-                Err(e) => {
-                    drop(inner);
+            match self.connect_opened(connected).await {
+                ConnectAttempt::Finished(result) => return result,
+                ConnectAttempt::Failed(e) => {
                     last_error = Some(Self::worse_connect_error(last_error, e));
                 }
             }

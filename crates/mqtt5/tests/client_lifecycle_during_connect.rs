@@ -190,3 +190,86 @@ async fn is_connected_returns_while_connect_waits_for_connack() {
     connecting.abort();
     assert_eq!(state, Ok(false), "is_connected waited for the CONNACK");
 }
+
+#[tokio::test]
+async fn control_disconnect_returns_without_a_connect() {
+    let client = MqttClient::new("disconnect-control");
+    let disconnected = tokio::time::timeout(Duration::from_secs(2), client.disconnect()).await;
+    assert!(disconnected.is_ok(), "disconnect waited without a connect");
+}
+
+#[tokio::test]
+async fn disconnect_cancels_a_connect_waiting_for_connack() {
+    let (addr, accepted) = silent_server().await;
+    let client = MqttClient::new("disconnect-during-connack-wait");
+    let connecting = {
+        let client = client.clone();
+        tokio::spawn(async move {
+            client
+                .connect_with_options(
+                    &format!("mqtt://{addr}"),
+                    ConnectOptions::new("disconnect-during-connack-wait")
+                        .with_automatic_reconnect(false)
+                        .with_connect_packet_timeout(Duration::from_secs(30)),
+                )
+                .await
+        })
+    };
+    while accepted.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let disconnected = tokio::time::timeout(Duration::from_secs(2), client.disconnect()).await;
+    let connected = tokio::time::timeout(Duration::from_secs(2), connecting).await;
+    let state = client.is_connected().await;
+    assert!(
+        disconnected.is_ok(),
+        "disconnect waited for the CONNACK: {disconnected:?}"
+    );
+    let outcome = connected.expect("connect still waiting after disconnect");
+    assert!(
+        outcome.as_ref().is_ok_and(Result::is_err),
+        "connect ended with {outcome:?}"
+    );
+    assert!(!state, "connected after disconnect");
+}
+
+#[tokio::test]
+async fn disconnect_stops_a_reconnection_waiting_for_connack() {
+    let addr = unused_address().await;
+    let client = MqttClient::new("disconnect-during-reconnection-connack-wait");
+    client
+        .connect_with_options(
+            &format!("mqtt://{addr}"),
+            reconnecting("disconnect-during-reconnection-connack-wait")
+                .with_connect_packet_timeout(Duration::from_secs(30)),
+        )
+        .await
+        .expect_err("nothing listens there yet");
+    let listener = TcpListener::bind(addr).await.unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counting = Arc::clone(&accepted);
+    let server = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            counting.fetch_add(1, Ordering::SeqCst);
+            held.push(stream);
+        }
+    });
+    while accepted.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let disconnected = tokio::time::timeout(Duration::from_secs(2), client.disconnect()).await;
+    let after_disconnect = accepted.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let reconnections = accepted.load(Ordering::SeqCst) - after_disconnect;
+    let state = client.is_connected().await;
+    server.abort();
+    assert!(
+        disconnected.is_ok(),
+        "disconnect waited for the reconnection's CONNACK"
+    );
+    assert_eq!(reconnections, 0, "reconnected after disconnect");
+    assert!(!state, "connected after disconnect");
+}
