@@ -8,7 +8,6 @@ use crate::packet::{MqttPacket, Packet};
 use crate::session::flow_control::FlowControlManager;
 use crate::session::state::OutboundReplay;
 use crate::session::SessionState;
-use crate::transport::PacketWriter;
 use crate::QoS;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
@@ -17,7 +16,7 @@ use std::sync::{Arc, Weak};
 use tokio::sync::{RwLock, Semaphore};
 
 use super::tracking::{Completion, IdReservation, SharedIds, SharedOutcomes};
-use super::unified::UnifiedWriter;
+use super::unified::{Flush, UnifiedWriter};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PublishPolicy {
@@ -197,7 +196,7 @@ pub(super) struct SessionReplay {
     pub(super) items: Vec<OutboundReplay>,
     pub(super) slots: Arc<Semaphore>,
     pub(super) session: Arc<RwLock<SessionState>>,
-    pub(super) writer: Weak<tokio::sync::Mutex<UnifiedWriter>>,
+    pub(super) writer: Weak<UnifiedWriter>,
     pub(super) queued: Arc<Mutex<OfflineQueue>>,
     pub(super) policy: PublishPolicy,
     pub(super) outcomes: SharedOutcomes,
@@ -209,7 +208,7 @@ impl SessionReplay {
     pub(super) async fn run(self) {
         let flow = Arc::clone(self.session.read().await.flow_control());
         if self.replay_session_state(&flow).await && self.flush_offline_queue(&flow).await {
-            flow.read().await.finish_replay(&self.slots).await;
+            flow.read().await.finish_replay(&self.slots);
             tracing::debug!("Session replay complete");
         }
     }
@@ -412,7 +411,6 @@ impl SessionReplay {
                 flow.read()
                     .await
                     .claim_send_quota(&self.slots, packet_id)
-                    .await
                     .is_some()
             }
             Err(_) => false,
@@ -431,22 +429,30 @@ impl SessionReplay {
         let Some(writer) = self.writer.upgrade() else {
             return Written::NotAttempted;
         };
-        let mut writer = tokio::select! {
-            biased;
-            () = self.link.ended() => return Written::NotAttempted,
-            writer = writer.lock() => writer,
-        };
         if !self.link.is_current() {
             tracing::debug!("Session replay stopped: connection replaced");
             return Written::NotAttempted;
         }
+        let (start, end) = match writer.commit_span(&packet, || ()) {
+            Ok(span) => span,
+            Err(e) => {
+                tracing::debug!("Session replay stopped: {e}");
+                return Written::NotAttempted;
+            }
+        };
         tokio::select! {
             biased;
             () = self.link.ended() => {
-                tracing::debug!("Session replay stopped: connection ended during a write");
-                Written::Failed
+                writer.discard();
+                if writer.reached_transport(start) {
+                    tracing::debug!("Session replay stopped: connection ended during a write");
+                    Written::Failed
+                } else {
+                    tracing::debug!("Session replay stopped: connection ended before the write");
+                    Written::NotAttempted
+                }
             }
-            written = writer.write_packet(packet) => match written {
+            written = Flush::new(&writer, end).wait() => match written {
                 Ok(()) => Written::Complete,
                 Err(e) => {
                     tracing::debug!("Session replay stopped: {e}");
@@ -472,7 +478,7 @@ enum Transfer<'a> {
 
 async fn release_claim(flow: &Arc<RwLock<FlowControlManager>>, packet_id: Option<u16>) {
     if let Some(packet_id) = packet_id {
-        if let Err(e) = flow.read().await.acknowledge(packet_id).await {
+        if let Err(e) = flow.read().await.acknowledge(packet_id) {
             tracing::trace!(packet_id, "No send quota held: {e}");
         }
     }

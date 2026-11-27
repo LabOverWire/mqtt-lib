@@ -1,5 +1,6 @@
 use crate::error::{MqttError, Result};
 use crate::packet::connack::ConnAckPacket;
+use crate::packet::publish::PublishPacket;
 use crate::packet::subscribe::SubscribePacket;
 use crate::packet::unsubscribe::UnsubscribePacket;
 use crate::protocol::v5::properties::{Properties, PropertyId, PropertyValue};
@@ -138,6 +139,22 @@ pub(crate) fn check_topic_alias(
     } else {
         Err(MqttError::TopicAliasInvalid(alias))
     }
+}
+
+pub(crate) fn resolve_topic_alias(
+    mut publish: PublishPacket,
+    aliases: Option<&TopicAliasManager>,
+) -> Result<PublishPacket> {
+    if let Some(alias) = publish
+        .topic_alias()
+        .filter(|_| publish.topic_name.is_empty())
+    {
+        publish.topic_name = aliases
+            .and_then(|aliases| aliases.get_topic(alias))
+            .map(str::to_string)
+            .ok_or(MqttError::TopicAliasInvalid(alias))?;
+    }
+    Ok(publish)
 }
 
 #[cfg(test)]

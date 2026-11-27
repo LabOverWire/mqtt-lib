@@ -510,39 +510,25 @@ mod edge_case_tests {
 }
 
 #[cfg(test)]
-mod performance_property_tests {
+mod generated_input_acceptance_tests {
     use super::*;
-    use mqtt5::time::{Duration, Instant};
 
     proptest! {
         #[test]
-        fn prop_validation_performance(
+        fn prop_generated_filter_is_accepted(
             topic in topic_filter_with_wildcards()
         ) {
-            // Validation should be fast even for complex patterns
-            let start = Instant::now();
-            let _ = validate_filter(&topic);
-            let elapsed = start.elapsed();
-
-            // Topic validation should complete quickly (within 10ms)
-            // Note: 1ms was too strict and caused flaky tests under load
-            prop_assert!(elapsed < Duration::from_millis(10),
-                "Topic validation took too long: {:?}", elapsed);
+            prop_assert!(validate_filter(&topic).is_ok(),
+                "Filter '{topic}' should be valid");
         }
 
         #[test]
-        fn prop_aws_iot_validation_performance(
+        fn prop_aws_iot_accepts_plain_level(
             topic in valid_topic_level()
         ) {
             let validator = NamespaceValidator::aws_iot();
-
-            let start = Instant::now();
-            let _ = validator.validate_topic_name(&topic);
-            let elapsed = start.elapsed();
-
-            // AWS IoT validation should also be fast
-            prop_assert!(elapsed < Duration::from_millis(1),
-                "AWS IoT validation took too long: {:?}", elapsed);
+            prop_assert!(validator.validate_topic_name(&topic).is_ok(),
+                "Topic '{topic}' should be valid for AWS IoT");
         }
     }
 }

@@ -246,6 +246,7 @@ impl WasmClientHandler {
             publish,
             target_flow: None,
             subscription_instance: None,
+            received_at_ms: mqtt5::broker::storage::unix_millis_now(),
         };
         let lane = if qos == QoS::AtMostOnce {
             &self.qos0_tx
