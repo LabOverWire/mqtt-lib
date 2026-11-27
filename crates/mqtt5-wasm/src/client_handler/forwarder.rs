@@ -163,7 +163,7 @@ impl Forwarder {
             .filter(|msg| {
                 msg.phase == InflightPhase::AwaitingPubrec && !queued.contains(&msg.packet_id)
             })
-            .map(|msg| self.to_resent(msg.packet_id, msg.to_publish_packet()))
+            .map(InflightMessage::to_resend)
             .collect();
         self.return_to_queue(resends);
     }
@@ -200,10 +200,17 @@ impl Forwarder {
                     {
                         continue;
                     }
+                    if routable.expired() && !routable.started() {
+                        debug!(
+                            topic = %routable.publish.topic_name,
+                            "Dropping PUBLISH whose Message Expiry Interval passed before its delivery started"
+                        );
+                        continue;
+                    }
                     if !self.run_state.is_running() {
                         return Some(routable);
                     }
-                    if !self.forward_one(routable.publish).await {
+                    if !self.forward_one(routable).await {
                         return None;
                     }
                 }
@@ -239,16 +246,16 @@ impl Forwarder {
         let limit = QUEUE_BATCH.min(self.window_left());
         let mut pending = queue.take(limit).await.into_iter();
         while let Some(message) = pending.next() {
-            let queued = message.to_publish_packet();
+            let routable = RoutableMessage::from_queued(&message);
             if !self
                 .delivery_check
-                .allows(&queued, message.subscription_instance)
+                .allows(&routable.publish, message.subscription_instance)
                 .await
             {
                 continue;
             }
             let stopped = !self.run_state.is_running();
-            if stopped || !self.forward_one(queued).await {
+            if stopped || !self.forward_one(routable).await {
                 let rest = stopped
                     .then_some(message)
                     .into_iter()
@@ -292,9 +299,11 @@ impl Forwarder {
 
     /// Returns false when the connection can't be sent any more. A message over the client's
     /// Maximum Packet Size is discarded.
-    async fn forward_one(&mut self, mut publish: PublishPacket) -> bool {
+    async fn forward_one(&mut self, delivery: RoutableMessage) -> bool {
+        let mut delivery = delivery.restamped();
+        let publish = &mut delivery.publish;
         publish.protocol_version = self.protocol_version;
-        let packet_id = (publish.qos != QoS::AtMostOnce).then(|| self.assign_packet_id(&publish));
+        let packet_id = (publish.qos != QoS::AtMostOnce).then(|| self.assign_packet_id(publish));
         publish.packet_id = packet_id;
         publish.dup &= packet_id.is_some();
 
@@ -312,15 +321,14 @@ impl Forwarder {
         }
 
         if let Some(pid) = packet_id {
-            self.outbound_inflight
-                .borrow_mut()
-                .insert(pid, publish.clone());
             let inflight = InflightMessage::from_publish(
-                &publish,
+                &delivery.publish,
                 self.client_id.clone(),
                 InflightDirection::Outbound,
                 InflightPhase::AwaitingPubrec,
-            );
+            )
+            .with_received_at_ms(delivery.received_at_ms);
+            self.outbound_inflight.borrow_mut().insert(pid, delivery);
             if let Err(e) = self.storage.store_inflight_message(inflight).await {
                 debug!("failed to persist outbound inflight {pid}: {e}");
             }
@@ -344,16 +352,16 @@ impl Forwarder {
         let unacknowledged = self.outbound_inflight.borrow_mut().take_unreleased();
         let mut unsent: Vec<QueuedMessage> = unacknowledged
             .into_iter()
-            .map(|(pid, publish)| self.to_resent(pid, publish))
+            .map(|(pid, routable)| routable.to_resend(&self.client_id, pid))
             .collect();
         unsent.extend(
             taken
                 .into_iter()
                 .filter(|routable| routable.publish.qos != QoS::AtMostOnce)
-                .map(|routable| self.to_queued(routable)),
+                .map(|routable| routable.to_queued(&self.client_id)),
         );
         while let Ok(routable) = self.qos1_rx.try_recv() {
-            unsent.push(self.to_queued(routable));
+            unsent.push(routable.to_queued(&self.client_id));
         }
         self.return_to_queue(unsent);
         if let Ok(notice) = self.notice_rx.try_recv() {
@@ -381,19 +389,5 @@ impl Forwarder {
         }
         self.queue
             .requeue_front_in_epoch(messages, self.queue_epoch);
-    }
-
-    fn to_resent(&self, packet_id: u16, publish: PublishPacket) -> QueuedMessage {
-        let qos = publish.qos;
-        let mut queued = QueuedMessage::new(publish, self.client_id.clone(), qos, Some(packet_id));
-        queued.dup = true;
-        queued
-    }
-
-    fn to_queued(&self, routable: RoutableMessage) -> QueuedMessage {
-        let qos = routable.publish.qos;
-        let mut queued = QueuedMessage::new(routable.publish, self.client_id.clone(), qos, None);
-        queued.subscription_instance = routable.subscription_instance;
-        queued
     }
 }

@@ -93,7 +93,7 @@ mod clean_start_tests {
                 }
 
                 let initial_subs = session.all_subscriptions().await;
-                let initial_unacked = session.get_unacked_publishes().await;
+                let initial_unacked = session.get_unacked_publishes();
 
                 prop_assert!(!initial_subs.is_empty());
                 prop_assert!(!initial_unacked.is_empty());
@@ -101,7 +101,7 @@ mod clean_start_tests {
                 let clean_session = SessionState::new("client1".to_string(), config, true);
 
                 let clean_subs = clean_session.all_subscriptions().await;
-                let clean_unacked = clean_session.get_unacked_publishes().await;
+                let clean_unacked = clean_session.get_unacked_publishes();
 
                 prop_assert!(clean_subs.is_empty());
                 prop_assert!(clean_unacked.is_empty());
@@ -128,7 +128,7 @@ mod clean_start_tests {
                     session.store_unacked_publish(packet).await.unwrap();
                 }
 
-                let unacked_count = session.get_unacked_publishes().await.len();
+                let unacked_count = session.get_unacked_publishes().len();
                 prop_assert_eq!(unacked_count, packet_ids.len());
 
                 Ok(())
@@ -313,7 +313,7 @@ mod unacked_message_tests {
                     }
                 }
 
-                let unacked = session.get_unacked_publishes().await;
+                let unacked = session.get_unacked_publishes();
                 prop_assert_eq!(unacked.len(), qos_packets.len());
 
                 let half = qos_packets.len() / 2;
@@ -322,7 +322,7 @@ mod unacked_message_tests {
                     prop_assert!(removed.is_some());
                 }
 
-                let remaining = session.get_unacked_publishes().await;
+                let remaining = session.get_unacked_publishes();
                 prop_assert_eq!(remaining.len(), qos_packets.len() - half);
 
                 Ok(())
@@ -340,15 +340,15 @@ mod unacked_message_tests {
                 let packet = publish_packet(packet_id, QoS::ExactlyOnce);
 
                 session.store_unacked_publish(packet).await.unwrap();
-                prop_assert!(!session.get_unacked_publishes().await.is_empty());
+                prop_assert!(!session.get_unacked_publishes().is_empty());
 
                 session.complete_pubrec(packet_id).await;
                 session.store_pubrel(packet_id).await;
-                prop_assert!(session.get_unacked_publishes().await.is_empty());
-                prop_assert_eq!(session.get_unacked_pubrels().await.len(), 1);
+                prop_assert!(session.get_unacked_publishes().is_empty());
+                prop_assert_eq!(session.get_unacked_pubrels().len(), 1);
 
                 session.complete_pubrel(packet_id).await;
-                prop_assert!(session.get_unacked_pubrels().await.is_empty());
+                prop_assert!(session.get_unacked_pubrels().is_empty());
 
                 Ok(())
             })?;
@@ -406,7 +406,7 @@ mod unacked_message_tests {
                     session.store_unacked_pubrel(id).await;
                 }
 
-                let pubrels = session.get_unacked_pubrels().await;
+                let pubrels = session.get_unacked_pubrels();
                 prop_assert_eq!(pubrels.len(), unique_ids.len());
 
                 let unique_vec: Vec<_> = unique_ids.into_iter().collect();
@@ -416,7 +416,7 @@ mod unacked_message_tests {
                     prop_assert!(removed);
                 }
 
-                let remaining = session.get_unacked_pubrels().await;
+                let remaining = session.get_unacked_pubrels();
                 prop_assert_eq!(remaining.len(), unique_vec.len() - half);
 
                 Ok(())

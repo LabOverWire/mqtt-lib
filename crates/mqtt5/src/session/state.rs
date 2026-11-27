@@ -51,8 +51,8 @@ pub struct SessionState {
     subscriptions: Arc<RwLock<SubscriptionManager>>,
     /// `QoS` 1 and 2 message queue
     message_queue: Arc<RwLock<MessageQueue>>,
-    unacked_publishes: Arc<RwLock<HashMap<u16, (u64, PublishPacket)>>>,
-    unacked_pubrels: Arc<RwLock<HashMap<u16, (u64, Instant)>>>,
+    unacked_publishes: Arc<parking_lot::RwLock<HashMap<u16, (u64, PublishPacket)>>>,
+    unacked_pubrels: Arc<parking_lot::RwLock<HashMap<u16, (u64, Instant)>>>,
     outbound_send_order: AtomicU64,
     /// Inbound `QoS` 2 packet IDs we have PUBREC'd and owe a PUBCOMP for
     /// (`packet_id` -> timestamp).
@@ -140,8 +140,8 @@ impl SessionState {
                 config.max_queued_size,
             ))),
             config,
-            unacked_publishes: Arc::new(RwLock::new(HashMap::new())),
-            unacked_pubrels: Arc::new(RwLock::new(HashMap::new())),
+            unacked_publishes: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            unacked_pubrels: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             outbound_send_order: AtomicU64::new(0),
             inbound_pubrecs: Arc::new(RwLock::new(HashMap::new())),
             inbound_delivered: Arc::new(RwLock::new(HashMap::new())),
@@ -294,7 +294,6 @@ impl SessionState {
             let order = self.next_send_order();
             self.unacked_publishes
                 .write()
-                .await
                 .insert(packet_id, (order, packet));
             Ok(())
         } else {
@@ -309,20 +308,14 @@ impl SessionState {
         self.touch().await;
         self.unacked_publishes
             .write()
-            .await
             .remove(&packet_id)
             .map(|(_, packet)| packet)
     }
 
     /// Gets all unacknowledged PUBLISH packets
-    pub async fn get_unacked_publishes(&self) -> Vec<PublishPacket> {
-        let mut ordered: Vec<(u64, PublishPacket)> = self
-            .unacked_publishes
-            .read()
-            .await
-            .values()
-            .cloned()
-            .collect();
+    pub fn get_unacked_publishes(&self) -> Vec<PublishPacket> {
+        let mut ordered: Vec<(u64, PublishPacket)> =
+            self.unacked_publishes.read().values().cloned().collect();
         ordered.sort_by_key(|(order, _)| *order);
         ordered.into_iter().map(|(_, packet)| packet).collect()
     }
@@ -335,21 +328,17 @@ impl SessionState {
     /// Removes an acknowledged PUBREL packet
     pub async fn remove_unacked_pubrel(&self, packet_id: u16) -> bool {
         self.touch().await;
-        self.unacked_pubrels
-            .write()
-            .await
-            .remove(&packet_id)
-            .is_some()
+        self.unacked_pubrels.write().remove(&packet_id).is_some()
     }
 
     /// Gets all unacknowledged PUBREL packet IDs
-    pub async fn get_unacked_pubrels(&self) -> Vec<u16> {
-        self.unacked_pubrels.read().await.keys().copied().collect()
+    pub fn get_unacked_pubrels(&self) -> Vec<u16> {
+        self.unacked_pubrels.read().keys().copied().collect()
     }
 
-    pub async fn outbound_replay(&self) -> Vec<OutboundReplay> {
-        let publishes = self.unacked_publishes.read().await;
-        let pubrels = self.unacked_pubrels.read().await;
+    pub fn outbound_replay(&self) -> Vec<OutboundReplay> {
+        let publishes = self.unacked_publishes.read();
+        let pubrels = self.unacked_pubrels.read();
         let mut ordered: Vec<(bool, u64, OutboundReplay)> = pubrels
             .iter()
             .map(|(packet_id, (order, _))| (false, *order, OutboundReplay::PubRel(*packet_id)))
@@ -366,11 +355,10 @@ impl SessionState {
     }
 
     /// Reports which acknowledgement the outbound packet identifier is waiting for.
-    pub async fn outbound_stage(&self, packet_id: u16) -> Option<OutboundStage> {
+    pub fn outbound_stage(&self, packet_id: u16) -> Option<OutboundStage> {
         let publish_qos = self
             .unacked_publishes
             .read()
-            .await
             .get(&packet_id)
             .map(|(_, publish)| publish.qos);
         match publish_qos {
@@ -379,30 +367,29 @@ impl SessionState {
             None => self
                 .unacked_pubrels
                 .read()
-                .await
                 .contains_key(&packet_id)
                 .then_some(OutboundStage::AwaitingPubComp),
         }
     }
 
-    pub async fn discard_outbound_state(&self) {
-        self.unacked_publishes.write().await.clear();
-        self.unacked_pubrels.write().await.clear();
+    pub fn discard_outbound_state(&self) {
+        self.unacked_publishes.write().clear();
+        self.unacked_pubrels.write().clear();
     }
 
     pub async fn complete_outbound(&self, packet_id: u16) {
         self.touch().await;
-        self.unacked_publishes.write().await.remove(&packet_id);
-        self.unacked_pubrels.write().await.remove(&packet_id);
+        self.unacked_publishes.write().remove(&packet_id);
+        self.unacked_pubrels.write().remove(&packet_id);
     }
 
-    pub async fn allocate_packet_id(
+    pub fn allocate_packet_id(
         &self,
         generator: &PacketIdGenerator,
         in_use_elsewhere: impl Fn(u16) -> bool,
     ) -> Option<u16> {
-        let publishes = self.unacked_publishes.read().await;
-        let pubrels = self.unacked_pubrels.read().await;
+        let publishes = self.unacked_publishes.read();
+        let pubrels = self.unacked_pubrels.read();
         generator.next_available(|packet_id| {
             publishes.contains_key(&packet_id)
                 || pubrels.contains_key(&packet_id)
@@ -414,8 +401,8 @@ impl SessionState {
     pub async fn clear(&self) {
         self.subscriptions.write().await.clear();
         self.message_queue.write().await.clear();
-        self.unacked_publishes.write().await.clear();
-        self.unacked_pubrels.write().await.clear();
+        self.unacked_publishes.write().clear();
+        self.unacked_pubrels.write().clear();
         self.inbound_pubrecs.write().await.clear();
         self.inbound_delivered.write().await.clear();
         self.inbound_resolution.write().await.clear();
@@ -425,11 +412,13 @@ impl SessionState {
 
     /// Gets session statistics
     pub async fn stats(&self) -> SessionStats {
+        let unacked_publish_count = self.unacked_publishes.read().len();
+        let unacked_pubrel_count = self.unacked_pubrels.read().len();
         SessionStats {
             subscription_count: self.subscriptions.read().await.count(),
             queued_message_count: self.message_queue.read().await.len(),
-            unacked_publish_count: self.unacked_publishes.read().await.len(),
-            unacked_pubrel_count: self.unacked_pubrels.read().await.len(),
+            unacked_publish_count,
+            unacked_pubrel_count,
             uptime: self.created_at.elapsed(),
             last_activity: self.last_activity.read().await.elapsed(),
         }
@@ -438,7 +427,7 @@ impl SessionState {
     /// Sets the receive maximum for flow control
     pub async fn set_receive_maximum(&self, receive_maximum: u16) {
         let mut flow_control = self.flow_control.write().await;
-        flow_control.set_receive_maximum(receive_maximum).await;
+        flow_control.set_receive_maximum(receive_maximum);
     }
 
     /// Sets the topic alias maximum for outgoing messages
@@ -464,11 +453,7 @@ impl SessionState {
     ///
     /// Returns an error if the operation fails
     pub async fn register_in_flight(&self, packet_id: u16) -> Result<()> {
-        self.flow_control
-            .write()
-            .await
-            .register_send(packet_id)
-            .await
+        self.flow_control.write().await.register_send(packet_id)
     }
 
     /// Acknowledges a `QoS` 1/2 message for flow control
@@ -477,7 +462,7 @@ impl SessionState {
     ///
     /// Returns an error if the operation fails
     pub async fn acknowledge_in_flight(&self, packet_id: u16) -> Result<()> {
-        self.flow_control.write().await.acknowledge(packet_id).await
+        self.flow_control.write().await.acknowledge(packet_id)
     }
 
     #[must_use]
@@ -625,7 +610,7 @@ impl SessionState {
     /// Complete a publish (`QoS` 1 - after PUBACK received)
     pub async fn complete_publish(&self, packet_id: u16) {
         self.touch().await;
-        self.unacked_publishes.write().await.remove(&packet_id);
+        self.unacked_publishes.write().remove(&packet_id);
     }
 
     /// Records that PUBREC is owed for an inbound `QoS` 2 packet ID, reporting whether this
@@ -767,15 +752,14 @@ impl SessionState {
         let order = self.next_send_order();
         self.unacked_pubrels
             .write()
-            .await
             .entry(packet_id)
             .or_insert((order, Instant::now()));
     }
 
     pub async fn complete_pubrec(&self, packet_id: u16) {
         self.touch().await;
-        let mut publishes = self.unacked_publishes.write().await;
-        let mut pubrels = self.unacked_pubrels.write().await;
+        let mut publishes = self.unacked_publishes.write();
+        let mut pubrels = self.unacked_pubrels.write();
         if publishes.remove(&packet_id).is_some() {
             pubrels.insert(packet_id, (self.next_send_order(), Instant::now()));
         }
@@ -784,7 +768,7 @@ impl SessionState {
     /// Complete PUBREL (after receiving PUBCOMP)
     pub async fn complete_pubrel(&self, packet_id: u16) {
         self.touch().await;
-        self.unacked_pubrels.write().await.remove(&packet_id);
+        self.unacked_pubrels.write().remove(&packet_id);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1008,13 +992,13 @@ mod tests {
 
         session.store_unacked_publish(packet.clone()).await.unwrap();
 
-        let unacked = session.get_unacked_publishes().await;
+        let unacked = session.get_unacked_publishes();
         assert_eq!(unacked.len(), 1);
         assert_eq!(unacked[0].packet_id, Some(123));
 
         let removed = session.remove_unacked_publish(123).await;
         assert!(removed.is_some());
-        assert_eq!(session.get_unacked_publishes().await.len(), 0);
+        assert_eq!(session.get_unacked_publishes().len(), 0);
     }
 
     #[tokio::test]
@@ -1024,13 +1008,13 @@ mod tests {
         session.store_unacked_pubrel(100).await;
         session.store_unacked_pubrel(101).await;
 
-        let pubrels = session.get_unacked_pubrels().await;
+        let pubrels = session.get_unacked_pubrels();
         assert_eq!(pubrels.len(), 2);
         assert!(pubrels.contains(&100));
         assert!(pubrels.contains(&101));
 
         assert!(session.remove_unacked_pubrel(100).await);
-        assert_eq!(session.get_unacked_pubrels().await.len(), 1);
+        assert_eq!(session.get_unacked_pubrels().len(), 1);
     }
 
     #[tokio::test]
@@ -1061,7 +1045,7 @@ mod tests {
 
         assert_eq!(session.all_subscriptions().await.len(), 0);
         assert_eq!(session.queued_message_count().await, 0);
-        assert_eq!(session.get_unacked_pubrels().await.len(), 0);
+        assert_eq!(session.get_unacked_pubrels().len(), 0);
     }
 
     #[tokio::test]
@@ -1253,15 +1237,15 @@ mod tests {
         };
 
         session.store_unacked_publish(packet).await.unwrap();
-        assert_eq!(session.get_unacked_publishes().await.len(), 1);
+        assert_eq!(session.get_unacked_publishes().len(), 1);
 
         session.complete_pubrec(123).await;
         session.store_pubrel(123).await;
-        assert_eq!(session.get_unacked_publishes().await.len(), 0);
-        assert_eq!(session.get_unacked_pubrels().await.len(), 1);
+        assert_eq!(session.get_unacked_publishes().len(), 0);
+        assert_eq!(session.get_unacked_pubrels().len(), 1);
 
         session.complete_pubrel(123).await;
-        assert_eq!(session.get_unacked_pubrels().await.len(), 0);
+        assert_eq!(session.get_unacked_pubrels().len(), 0);
     }
 
     #[tokio::test]
@@ -1400,10 +1384,10 @@ mod tests {
         };
 
         session.store_unacked_publish(packet).await.unwrap();
-        assert_eq!(session.get_unacked_publishes().await.len(), 1);
+        assert_eq!(session.get_unacked_publishes().len(), 1);
 
         session.complete_publish(100).await;
-        assert_eq!(session.get_unacked_publishes().await.len(), 0);
+        assert_eq!(session.get_unacked_publishes().len(), 0);
     }
 
     fn outbound_publish(packet_id: u16, qos: QoS) -> PublishPacket {
@@ -1441,7 +1425,7 @@ mod tests {
         }
 
         assert_eq!(
-            replay_ids(&session.outbound_replay().await),
+            replay_ids(&session.outbound_replay()),
             vec![('P', 30), ('P', 10), ('P', 20)]
         );
     }
@@ -1468,19 +1452,19 @@ mod tests {
         session.store_pubrel(30).await;
 
         assert_eq!(
-            replay_ids(&session.outbound_replay().await),
+            replay_ids(&session.outbound_replay()),
             vec![('R', 40), ('R', 20), ('R', 30), ('P', 10)]
         );
 
         session.complete_outbound(10).await;
         session.complete_outbound(40).await;
         assert_eq!(
-            replay_ids(&session.outbound_replay().await),
+            replay_ids(&session.outbound_replay()),
             vec![('R', 20), ('R', 30)]
         );
 
-        session.discard_outbound_state().await;
-        assert!(session.outbound_replay().await.is_empty());
+        session.discard_outbound_state();
+        assert!(session.outbound_replay().is_empty());
     }
 
     #[tokio::test]
@@ -1494,7 +1478,7 @@ mod tests {
         session.store_pubrel(2).await;
 
         assert_eq!(
-            session.allocate_packet_id(&generator, |id| id == 3).await,
+            session.allocate_packet_id(&generator, |id| id == 3),
             Some(4)
         );
     }

@@ -165,7 +165,7 @@ pub struct ClientHandler {
     pub(super) client_receive_maximum: u16,
     pub(super) server_receive_maximum: u16,
     pub(super) client_max_packet_size: Option<u32>,
-    pub(super) outbound_inflight: HashMap<u16, PublishPacket>,
+    pub(super) outbound_inflight: HashMap<u16, RoutableMessage>,
     pub(super) protocol_version: u8,
     pub(super) write_buffer: BytesMut,
     pub(super) read_buffer: BytesMut,
@@ -965,12 +965,8 @@ impl ClientHandler {
             if self.awaiting_pubcomp.contains(&packet_id) {
                 continue;
             }
-            if let Some(publish) = self.outbound_inflight.remove(&packet_id) {
-                let qos = publish.qos;
-                let mut queued =
-                    QueuedMessage::new(publish, client_id.clone(), qos, Some(packet_id));
-                queued.dup = true;
-                unsent.push(queued);
+            if let Some(routable) = self.outbound_inflight.remove(&packet_id) {
+                unsent.push(routable.to_resend(&client_id, packet_id));
                 unacked_ids.push(packet_id);
             }
         }
@@ -978,12 +974,7 @@ impl ClientHandler {
         self.awaiting_pubcomp.clear();
         unsent.append(&mut self.held);
         while let Some(routable) = self.qos1_rx.recv().await {
-            let qos = routable.publish.qos;
-            unsent.push(
-                QueuedMessage::new(routable.publish, client_id.clone(), qos, None)
-                    .with_target_flow(routable.target_flow)
-                    .with_subscription_instance(routable.subscription_instance),
-            );
+            unsent.push(routable.to_queued(&client_id));
         }
         if unsent.is_empty() {
             return;
