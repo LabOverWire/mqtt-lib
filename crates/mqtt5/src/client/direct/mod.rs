@@ -575,7 +575,6 @@ impl DisconnectRequests {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn pending(&self) -> bool {
         self.waiting.borrow().all > 0
     }
