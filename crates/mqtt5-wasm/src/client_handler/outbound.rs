@@ -1,9 +1,9 @@
-use mqtt5_protocol::packet::publish::PublishPacket;
+use mqtt5::broker::router::RoutableMessage;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 #[derive(Default)]
 pub(super) struct OutboundInflight {
-    publishes: HashMap<u16, PublishPacket>,
+    publishes: HashMap<u16, RoutableMessage>,
     send_order: VecDeque<u16>,
     awaiting_pubcomp: HashSet<u16>,
 }
@@ -17,7 +17,7 @@ impl OutboundInflight {
         self.publishes.contains_key(&packet_id)
     }
 
-    pub(super) fn get(&self, packet_id: u16) -> Option<&PublishPacket> {
+    pub(super) fn get(&self, packet_id: u16) -> Option<&RoutableMessage> {
         self.publishes.get(&packet_id)
     }
 
@@ -25,13 +25,13 @@ impl OutboundInflight {
         self.publishes.keys().max().copied()
     }
 
-    pub(super) fn insert(&mut self, packet_id: u16, publish: PublishPacket) {
+    pub(super) fn insert(&mut self, packet_id: u16, publish: RoutableMessage) {
         if self.publishes.insert(packet_id, publish).is_none() {
             self.send_order.push_back(packet_id);
         }
     }
 
-    pub(super) fn insert_released(&mut self, packet_id: u16, publish: PublishPacket) {
+    pub(super) fn insert_released(&mut self, packet_id: u16, publish: RoutableMessage) {
         self.insert(packet_id, publish);
         self.awaiting_pubcomp.insert(packet_id);
     }
@@ -49,7 +49,7 @@ impl OutboundInflight {
         self.awaiting_pubcomp.remove(&packet_id);
     }
 
-    pub(super) fn take_unreleased(&mut self) -> Vec<(u16, PublishPacket)> {
+    pub(super) fn take_unreleased(&mut self) -> Vec<(u16, RoutableMessage)> {
         let unreleased = std::mem::take(&mut self.send_order)
             .into_iter()
             .filter(|packet_id| !self.awaiting_pubcomp.contains(packet_id))

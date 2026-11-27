@@ -820,6 +820,28 @@ impl WebSocketWriteHandle {
             .await
             .map_err(|e| MqttError::Io(e.to_string()))
     }
+
+    pub(crate) async fn ready(&mut self) -> Result<()> {
+        use futures_util::SinkExt;
+        futures_util::future::poll_fn(|cx| self.writer.poll_ready_unpin(cx))
+            .await
+            .map_err(|e| MqttError::Io(e.to_string()))
+    }
+
+    pub(crate) fn start(&mut self, message: Bytes) -> Result<()> {
+        use futures_util::SinkExt;
+        self.writer
+            .start_send_unpin(Message::Binary(message))
+            .map_err(|e| MqttError::Io(e.to_string()))
+    }
+
+    pub(crate) async fn flush(&mut self) -> Result<()> {
+        use futures_util::SinkExt;
+        self.writer
+            .flush()
+            .await
+            .map_err(|e| MqttError::Io(e.to_string()))
+    }
 }
 
 impl PacketReader for WebSocketReadHandle {

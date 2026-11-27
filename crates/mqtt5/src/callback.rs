@@ -103,6 +103,10 @@ impl CallbackManager {
         topic_filter: &str,
         callback: PublishCallback,
     ) -> Result<CallbackId> {
+        Ok(self.add(topic_filter, callback))
+    }
+
+    pub(crate) fn add(&self, topic_filter: &str, callback: PublishCallback) -> CallbackId {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
         let entry = CallbackEntry {
@@ -115,7 +119,7 @@ impl CallbackManager {
 
         self.register_internal(topic_filter, entry);
 
-        Ok(id)
+        id
     }
 
     /// # Errors
@@ -165,6 +169,19 @@ impl CallbackManager {
         } else {
             false
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn unregister_callback(&self, id: CallbackId) {
+        self.callback_registry.lock().remove(&id);
+        self.wildcard_callbacks
+            .lock()
+            .retain(|entry| entry.id != id);
+        let mut exact = self.exact_callbacks.lock();
+        exact.retain(|_, entries| {
+            entries.retain(|entry| entry.id != id);
+            !entries.is_empty()
+        });
     }
 
     #[must_use]

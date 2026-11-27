@@ -9,7 +9,6 @@ use crate::protocol::v5::properties::Properties;
 use crate::session::state::AckResolution;
 use crate::session::{SessionState, TopicAliasManager};
 use crate::transport::packet_io::encode_packet_to_buffer;
-use crate::transport::PacketWriter;
 use crate::QoS;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -40,7 +39,7 @@ pub(super) struct IncomingHandlers<'a> {
 
 pub(super) async fn handle_incoming_packet_with_writer(
     packet: Packet,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: &Arc<UnifiedWriter>,
     flow_id: Option<crate::transport::flow::FlowId>,
     handlers: &IncomingHandlers<'_>,
 ) -> Result<()> {
@@ -76,7 +75,7 @@ pub(super) async fn handle_incoming_packet_with_writer(
 }
 
 enum AckRoute<'a> {
-    Direct(&'a Arc<tokio::sync::Mutex<UnifiedWriter>>),
+    Direct(&'a Arc<UnifiedWriter>),
     Ordered(&'a Arc<AckDispatcher>),
 }
 
@@ -132,12 +131,12 @@ pub(super) async fn ack_fits_server_maximum(
 }
 
 async fn write_ack(
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: &Arc<UnifiedWriter>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     packet: Packet,
 ) -> Result<()> {
     if ack_fits_server_maximum(session, &packet).await {
-        writer.lock().await.write_packet(packet).await
+        writer.send_detached(&packet)
     } else {
         Ok(())
     }
@@ -145,7 +144,7 @@ async fn write_ack(
 
 pub(super) async fn handle_publish_with_ack(
     mut publish: crate::packet::publish::PublishPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: &Arc<UnifiedWriter>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
     callback_manager: &Arc<CallbackManager>,
     flow_id: Option<crate::transport::flow::FlowId>,
@@ -441,7 +440,7 @@ pub(super) async fn handle_incoming_packet_no_writer(
 
 pub(super) async fn handle_pubrec_outgoing(
     pubrec: crate::packet::pubrec::PubRecPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: &Arc<UnifiedWriter>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
     session
@@ -456,11 +455,7 @@ pub(super) async fn handle_pubrec_outgoing(
         properties: Properties::default(),
     };
 
-    writer
-        .lock()
-        .await
-        .write_packet(crate::packet::Packet::PubRel(pub_rel))
-        .await?;
+    writer.send_detached(&crate::packet::Packet::PubRel(pub_rel))?;
 
     session.write().await.store_pubrel(pubrec.packet_id).await;
 
@@ -484,7 +479,7 @@ pub(super) async fn handle_pubcomp_outgoing(
 
 pub(super) async fn handle_pubrel(
     pubrel: crate::packet::pubrel::PubRelPacket,
-    writer: &Arc<tokio::sync::Mutex<UnifiedWriter>>,
+    writer: &Arc<UnifiedWriter>,
     session: &Arc<tokio::sync::RwLock<SessionState>>,
 ) -> Result<()> {
     session
@@ -528,13 +523,13 @@ mod tests {
 
     const PUBREC_HEADER: u8 = 0x50;
 
-    async fn loopback_writer() -> (Arc<tokio::sync::Mutex<UnifiedWriter>>, TcpStream) {
+    async fn loopback_writer() -> (Arc<UnifiedWriter>, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
         let (_read_half, write_half) = client.unwrap().into_split();
         (
-            Arc::new(tokio::sync::Mutex::new(UnifiedWriter::Tcp(write_half))),
+            Arc::new(UnifiedWriter::tcp(write_half)),
             accepted.unwrap().0,
         )
     }

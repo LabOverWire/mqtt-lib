@@ -209,6 +209,12 @@ pub enum MqttError {
 
     #[cfg_attr(feature = "std", error("Configuration error: {0}"))]
     Configuration(String),
+
+    #[cfg_attr(
+        feature = "std",
+        error("Outcome unknown: the request was sent, but the connection closed before the server acknowledged it")
+    )]
+    OutcomeUnknown,
 }
 
 #[cfg(not(feature = "std"))]
@@ -291,6 +297,10 @@ impl fmt::Display for MqttError {
                 write!(f, "String too long: {len} bytes exceeds maximum of 65535")
             }
             Self::Configuration(s) => write!(f, "Configuration error: {s}"),
+            Self::OutcomeUnknown => write!(
+                f,
+                "Outcome unknown: the request was sent, but the connection closed before the server acknowledged it"
+            ),
         }
     }
 }
