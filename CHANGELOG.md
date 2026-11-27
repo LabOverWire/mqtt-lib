@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [mqtt5 0.51.1] - 2026-11-26
+
 ### Fixed
 
 - **The broker no longer sends MQTT 5 packets to MQTT 3.1.1 clients when it refuses a PUBLISH** (#247). A refused QoS 1 or QoS 2 PUBLISH (not authorized, QoS above `maximum_qos`, a retained message over `max_retained_message_size` or `max_retained_messages`, or over `max_message_rate_per_client`) was answered with a PUBACK or PUBREC carrying a reason code and a Reason String, which a 3.1.1 client reads as a malformed packet. MQTT 3.1.1 has no way to refuse a PUBLISH (MQTT-3.3.5-2), so the broker now closes the 3.1.1 connection without answering, and the client can send the message again once it reconnects. A positive acknowledgement was not chosen because it would tell the client a message was accepted that the broker dropped. A refused QoS 0 PUBLISH is still dropped and the connection kept. Exceeding the server Receive Maximum and being taken over by another connection now also close a 3.1.1 connection without the MQTT 5 DISCONNECT, and a PUBREL for an unknown packet identifier gets a 3.1.1 PUBCOMP without the reason code. MQTT 5 connections are unchanged. This applies to the native and wasm brokers.
 - **The broker's own `$SYS` retained messages no longer count against `max_retained_messages`** (#240). They were stored past the limit (#227) but still counted, so the `$SYS` topics took up to 15 of the slots meant for clients, a small limit let no client retain anything, and how many a client could retain depended on how long the broker had been running. Only retained messages from clients, wills and bridges count now. A client's retained message on a `$SYS` topic still counts until the broker publishes to that topic. `$SYS/broker/retained/count` still reports every stored retained message. Retained messages loaded from storage at startup count as client messages, so a `$SYS` message persisted by an earlier run counts until the broker publishes that topic again.
 - **A quics:// connect whose certificate is refused returns within 2 s** (#372). The client opens every address a name resolves to at once and waited for all of them, so `quics://localhost` to a broker on 127.0.0.1 alone, with a CA that did not sign its certificate, returned the error only after the unanswered `[::1]` attempt reached the QUIC connect timeout (30 s by default). When the QUIC handshake on one address fails with a TLS alert, the connect now waits at most 2 s more for the other addresses, then returns that refusal; an address that connects within that time is still used, in case a name's addresses lead to different servers.
+
+## [mqttv5-cli 0.29.13] - 2026-11-26
+
+### Fixed
+
 - **`mqttv5 bench --mode hol-blocking` sends each topic's QoS 1 and QoS 2 messages in order.** Each publish ran in a task of its own, so a topic's messages raced for the connection: in a 2 s unpaced run over a local TCP connection, 3.7% of QoS 1 and 5.8% of QoS 2 messages arrived after a later message on their topic. Each topic now writes its publishes one after another with `begin_publish` and keeps up to `--inflight` of them waiting for their acknowledgement.
+
+### Changed
+
+- Requires mqtt5 0.51.1. See mqtt5 0.51.1.
 
 ## [mqtt5 0.51.0] - 2026-11-26
 

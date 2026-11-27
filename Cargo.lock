@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.51.0"
+version = "0.51.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "mqttv5-cli"
-version = "0.29.12"
+version = "0.29.13"
 dependencies = [
  "anyhow",
  "argon2",
