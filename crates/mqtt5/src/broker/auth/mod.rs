@@ -299,8 +299,9 @@ pub trait AuthProvider: Send + Sync {
         auth_method: &'a str,
         auth_data: Option<&'a [u8]>,
         client_id: &'a str,
-        _client_addr: SocketAddr,
+        client_addr: SocketAddr,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        tracing::trace!(%client_addr, client_id, auth_method, "Enhanced authentication step");
         self.authenticate_enhanced(auth_method, auth_data, client_id)
     }
 
@@ -313,8 +314,9 @@ pub trait AuthProvider: Send + Sync {
         auth_data: Option<&'a [u8]>,
         client_id: &'a str,
         user_id: Option<&'a str>,
-        _client_addr: SocketAddr,
+        client_addr: SocketAddr,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        tracing::trace!(%client_addr, client_id, auth_method, "Re-authentication step");
         self.reauthenticate(auth_method, auth_data, client_id, user_id)
     }
 
