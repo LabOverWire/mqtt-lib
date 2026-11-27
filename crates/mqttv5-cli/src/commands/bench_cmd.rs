@@ -7,7 +7,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use mqtt5::time::Duration;
-use mqtt5::{ConnectOptions, MqttClient, QoS};
+use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishOutcome, QoS};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write as _};
@@ -2156,11 +2156,17 @@ fn spawn_hol_publishers(
                     }
                     continue;
                 };
-                let client = client.clone();
+                let options = PublishOptions {
+                    qos,
+                    ..Default::default()
+                };
+                let Ok(handle) = client.begin_publish(topic.as_ref(), payload, options).await
+                else {
+                    continue;
+                };
                 let published = Arc::clone(&published);
-                let topic = Arc::clone(&topic);
                 tokio::spawn(async move {
-                    if publish_message(&client, &topic, payload, qos).await.is_ok() {
+                    if matches!(handle.outcome().await, PublishOutcome::Delivered(_)) {
                         published.fetch_add(1, Ordering::Relaxed);
                     }
                     drop(permit);
