@@ -1008,6 +1008,16 @@ mod tests {
             self.inbox.borrow().clone()
         }
 
+        async fn wait_for_deliveries(&self, count: usize) -> Vec<(char, bool, Vec<u8>)> {
+            for _ in 0..300 {
+                if deliveries(&self.received()).len() >= count {
+                    break;
+                }
+                sleep(10).await;
+            }
+            deliveries(&self.received())
+        }
+
         fn received(&self) -> Vec<u8> {
             self.inbox.borrow().clone()
         }
@@ -1088,7 +1098,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-            .subscriptions[topic_filter]
+            .subscription(topic_filter, None)
+            .unwrap()
             .instance
     }
 
@@ -1165,7 +1176,7 @@ mod tests {
             "a displaced connection's SUBSCRIBE installed a route for the successor"
         );
         let stored = broker.storage.get_session("dsub").await.unwrap().unwrap();
-        assert!(!stored.subscriptions.contains_key("dsub/t"));
+        assert!(stored.subscription("dsub/t", None).is_none());
     }
 
     #[wasm_bindgen_test]
@@ -1188,7 +1199,7 @@ mod tests {
             "a displaced connection's UNSUBSCRIBE removed the successor's route"
         );
         let stored = broker.storage.get_session("dunsub").await.unwrap().unwrap();
-        assert!(stored.subscriptions.contains_key("keep/x"));
+        assert!(stored.subscription("keep/x", None).is_some());
     }
 
     #[wasm_bindgen_test]
@@ -1216,7 +1227,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!stored.subscriptions.contains_key("secret/x"));
+        assert!(stored.subscription("secret/x", None).is_none());
     }
 
     #[wasm_bindgen_test]
@@ -1333,8 +1344,8 @@ mod tests {
         client.send_raw(&pipelined);
         sleep(500).await;
         let stored = broker.storage.get_session("rw1").await.unwrap().unwrap();
-        assert!(!stored.subscriptions.contains_key("secret/#"));
-        assert!(stored.subscriptions.contains_key("secret/x"));
+        assert!(stored.subscription("secret/#", None).is_none());
+        assert!(stored.subscription("secret/x", None).is_some());
         let received = client.received();
         let mut rest = received.as_slice();
         let mut types = Vec::new();
@@ -3040,6 +3051,15 @@ mod tests {
         );
     }
 
+    fn disconnect_count(broker: &WasmBroker) -> Rc<std::cell::Cell<u32>> {
+        let count = Rc::new(std::cell::Cell::new(0));
+        let counter = Rc::clone(&count);
+        let callback =
+            Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| counter.set(counter.get() + 1));
+        broker.on_client_disconnect(callback.into_js_value().unchecked_into());
+        count
+    }
+
     fn deliveries(bytes: &[u8]) -> Vec<(char, bool, Vec<u8>)> {
         publish_frames(bytes)
             .iter()
@@ -3099,10 +3119,17 @@ mod tests {
             .iter()
             .map(|(_, body)| publish_packet_id(body))
             .collect();
+        let disconnects = disconnect_count(&broker);
         let second = connected(&broker, connect_options("ended", false, 3600)).await;
         sleep(100).await;
+        let before_close = disconnects.get();
         second.port.close();
-        sleep(300).await;
+        for _ in 0..300 {
+            if disconnects.get() > before_close {
+                break;
+            }
+            sleep(10).await;
+        }
         gate.add_permits(100);
         sleep(300).await;
         let mut stored: Vec<u16> = broker
@@ -3115,8 +3142,7 @@ mod tests {
             .collect();
         stored.sort_unstable();
         let third = start_connect(&broker, connect_options("ended", false, 3600));
-        sleep(300).await;
-        let on_third = deliveries(&third.received());
+        let on_third = third.wait_for_deliveries(3).await;
         drop(first);
         assert_eq!(
             (stored, on_third),
@@ -3401,5 +3427,160 @@ mod tests {
     async fn a_message_that_expires_behind_a_full_window_is_not_delivered() {
         let sent = sent_after_waiting_behind_a_full_window("window-2", 1, 2_500).await;
         assert!(sent.is_empty(), "received {sent:?}");
+    }
+
+    fn aliased(
+        topic: &str,
+        alias: u16,
+        packet_id: u16,
+    ) -> mqtt5_protocol::packet::publish::PublishPacket {
+        mqtt5_protocol::packet::publish::PublishPacket::new(topic, b"m".to_vec(), QoS::AtLeastOnce)
+            .with_packet_id(packet_id)
+            .with_topic_alias(alias)
+    }
+
+    fn alias_broker(maximum: u16) -> WasmBroker {
+        let mut config = WasmBrokerConfig::new();
+        config.set_allow_anonymous(true);
+        config.set_topic_alias_maximum(maximum);
+        WasmBroker::with_config(config).unwrap()
+    }
+
+    fn delivered_topics(client: &Client) -> Vec<(String, Option<u16>)> {
+        decoded_publishes(&client.received())
+            .into_iter()
+            .map(|publish| (publish.topic_name, publish.properties.get_topic_alias()))
+            .collect()
+    }
+
+    async fn reply_to_publish(
+        maximum: u16,
+        publish: &mqtt5_protocol::packet::publish::PublishPacket,
+    ) -> (Vec<(u8, Vec<u8>)>, Vec<(String, Option<u16>)>) {
+        let broker = alias_broker(maximum);
+        let sub = connected(&broker, connect_options("alias-sub", true, 0)).await;
+        subscribed(&sub, "#").await;
+        let publisher = connected(&broker, connect_options("alias-pub", true, 0)).await;
+        publisher.send(publish);
+        sleep(150).await;
+        (frames(&publisher.received()), delivered_topics(&sub))
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_aliased_publish_is_delivered_without_the_alias() {
+        let (reply, delivered) = reply_to_publish(10, &aliased("alias/a", 1, 1)).await;
+        assert_eq!(reply, vec![(0x40, vec![0, 1])], "{reply:?}");
+        assert_eq!(
+            delivered,
+            vec![("alias/a".to_string(), None)],
+            "[MQTT-3.3.2-11] the publisher's Topic Alias must not reach the subscriber"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_empty_topic_resolves_through_the_publishers_own_alias() {
+        let broker = alias_broker(10);
+        let sub = connected(&broker, connect_options("alias-sub", true, 0)).await;
+        subscribed(&sub, "#").await;
+        let one = connected(&broker, connect_options("alias-one", true, 0)).await;
+        let two = connected(&broker, connect_options("alias-two", true, 0)).await;
+        one.send(&aliased("a/b", 1, 1));
+        sleep(50).await;
+        two.send(&aliased("c/d", 1, 1));
+        sleep(50).await;
+        one.send(&aliased("", 1, 2));
+        sleep(150).await;
+        assert_eq!(
+            delivered_topics(&sub),
+            vec![
+                ("a/b".to_string(), None),
+                ("c/d".to_string(), None),
+                ("a/b".to_string(), None)
+            ]
+        );
+        assert_eq!(
+            frames(&one.received()),
+            vec![(0x40, vec![0, 1]), (0x40, vec![0, 2])]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_new_aliased_topic_replaces_the_mapping() {
+        let broker = alias_broker(10);
+        let sub = connected(&broker, connect_options("alias-sub", true, 0)).await;
+        subscribed(&sub, "#").await;
+        let publisher = connected(&broker, connect_options("alias-pub", true, 0)).await;
+        publisher.send(&aliased("a/b", 1, 1));
+        publisher.send(&aliased("c/d", 1, 2));
+        publisher.send(&aliased("", 1, 3));
+        sleep(150).await;
+        assert_eq!(
+            delivered_topics(&sub),
+            vec![
+                ("a/b".to_string(), None),
+                ("c/d".to_string(), None),
+                ("c/d".to_string(), None)
+            ]
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_alias_from_an_earlier_connection_is_unknown() {
+        let broker = alias_broker(10);
+        let sub = connected(&broker, connect_options("alias-sub", true, 0)).await;
+        subscribed(&sub, "#").await;
+        let first = connected(&broker, connect_options("alias-pub", false, 3600)).await;
+        first.send(&aliased("a/b", 1, 1));
+        sleep(50).await;
+        first.send(&DisconnectPacket::new(ReasonCode::Success));
+        sleep(100).await;
+        let second = connected(&broker, connect_options("alias-pub", false, 3600)).await;
+        sub.clear();
+        second.send(&aliased("", 1, 2));
+        sleep(150).await;
+        let reply = frames(&second.received());
+        assert_eq!(reply, vec![(0xE0, vec![0x94])], "{reply:?}");
+        assert!(delivered_topics(&sub).is_empty());
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_unknown_alias_with_an_empty_topic_gets_disconnect_topic_alias_invalid() {
+        let (reply, delivered) = reply_to_publish(10, &aliased("", 3, 1)).await;
+        assert_eq!(reply, vec![(0xE0, vec![0x94])], "{reply:?}");
+        assert!(delivered.is_empty(), "{delivered:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn topic_alias_zero_gets_disconnect_topic_alias_invalid() {
+        let (reply, delivered) = reply_to_publish(10, &aliased("alias/a", 0, 1)).await;
+        assert_eq!(reply, vec![(0xE0, vec![0x94])], "{reply:?}");
+        assert!(delivered.is_empty(), "{delivered:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_alias_above_the_advertised_maximum_gets_disconnect_topic_alias_invalid() {
+        let (reply, delivered) = reply_to_publish(5, &aliased("alias/a", 6, 1)).await;
+        assert_eq!(reply, vec![(0xE0, vec![0x94])], "{reply:?}");
+        assert!(delivered.is_empty(), "{delivered:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_an_alias_at_the_advertised_maximum_is_accepted() {
+        let (reply, delivered) = reply_to_publish(5, &aliased("alias/a", 5, 1)).await;
+        assert_eq!(reply, vec![(0x40, vec![0, 1])], "{reply:?}");
+        assert_eq!(delivered, vec![("alias/a".to_string(), None)]);
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_empty_topic_without_an_alias_gets_disconnect_protocol_error() {
+        let publish = mqtt5_protocol::packet::publish::PublishPacket::new(
+            "",
+            b"m".to_vec(),
+            QoS::AtLeastOnce,
+        )
+        .with_packet_id(1);
+        let (reply, delivered) = reply_to_publish(10, &publish).await;
+        assert_eq!(reply, vec![(0xE0, vec![0x82])], "{reply:?}");
+        assert!(delivered.is_empty(), "{delivered:?}");
     }
 }

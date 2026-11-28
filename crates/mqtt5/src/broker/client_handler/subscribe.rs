@@ -144,9 +144,9 @@ impl ClientHandler {
                     .find(|accepted: &&AcceptedFilter<'_>| accepted.filter.filter == filter.filter)
                     .map_or_else(
                         || {
-                            self.session
-                                .as_ref()
-                                .map_or(0, |session| session.subscription_instance(&filter.filter))
+                            self.session.as_ref().map_or(0, |session| {
+                                session.subscription_instance(&filter.filter, flow_id)
+                            })
                         },
                         |accepted| accepted.stored.instance,
                     ),
@@ -249,7 +249,7 @@ impl ClientHandler {
         if self.config.max_subscriptions_per_client > 0 {
             let is_existing = self
                 .router
-                .has_subscription(client_id, &filter.filter)
+                .has_flow_subscription(client_id, &filter.filter, self.pending_external_flow_id)
                 .await;
             if !is_existing {
                 let current_count = self.router.subscription_count_for_client(client_id).await;
@@ -610,23 +610,8 @@ impl ClientHandler {
             .router
             .unsubscribe_by_flow(Some(self.generation), client_id, flow_id)
             .await;
-        let on_flow: Vec<String> = self.session.as_ref().map_or_else(Vec::new, |session| {
-            session
-                .subscriptions
-                .iter()
-                .filter(|(_, sub)| sub.flow_id == Some(flow_id))
-                .map(|(filter, _)| filter.clone())
-                .collect()
-        });
-        let mut followed = Vec::with_capacity(on_flow.len());
-        for filter in on_flow {
-            let held = self.router.held_flow(client_id, &filter).await;
-            followed.push((filter, held));
-        }
         if let Some(session) = self.session.as_mut() {
-            for (filter, held) in &followed {
-                session.follow_removed_subscription(filter, *held);
-            }
+            session.remove_flow_subscriptions(flow_id);
         }
         if let Some(ref mut ssm) = self.server_stream_manager {
             ssm.remove_flow_stream(flow_id);
@@ -641,11 +626,7 @@ impl ClientHandler {
             "Removed flow-bound subscriptions"
         );
         if let Err(e) = self
-            .update_stored_session(move |session| {
-                for (filter, held) in &followed {
-                    session.follow_removed_subscription(filter, *held);
-                }
-            })
+            .update_stored_session(move |session| session.remove_flow_subscriptions(flow_id))
             .await
         {
             warn!("Failed to store session after removing flow-bound subscriptions: {e}");
@@ -685,21 +666,17 @@ impl ClientHandler {
             }
         }
         if !removed_filters.is_empty() {
-            let mut followed = Vec::with_capacity(removed_filters.len());
-            for filter in removed_filters {
-                let held = self.router.held_flow(&client_id, &filter).await;
-                followed.push((filter, held));
-            }
-            let stored = followed.clone();
+            let flow_id = self.pending_external_flow_id;
+            let stored = removed_filters.clone();
             self.persist_or_restore_routes(&slot, move |session| {
-                for (filter, held) in &stored {
-                    session.follow_removed_subscription(filter, *held);
+                for filter in &stored {
+                    session.remove_subscription(filter, flow_id);
                 }
             })
             .await?;
             if let Some(session) = self.session.as_mut() {
-                for (filter, held) in &followed {
-                    session.follow_removed_subscription(filter, *held);
+                for filter in &removed_filters {
+                    session.remove_subscription(filter, flow_id);
                 }
             }
         }
