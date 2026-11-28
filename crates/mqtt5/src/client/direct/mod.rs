@@ -844,6 +844,11 @@ impl DirectClientInner {
                     }
                 }
             }
+            ReasonCode::ReAuthenticate => {
+                return Err(MqttError::ProtocolError(
+                    "server sent AUTH with reason code Re-authenticate (0x19)".to_string(),
+                ));
+            }
             ReasonCode::Success => {
                 tracing::debug!("CLIENT: AUTH success, waiting for CONNACK");
             }

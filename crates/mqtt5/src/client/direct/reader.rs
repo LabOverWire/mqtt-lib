@@ -357,6 +357,11 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
                 }
             }
         }
+        ReasonCode::ReAuthenticate => {
+            return Err(MqttError::ProtocolError(
+                "server sent AUTH with reason code Re-authenticate (0x19)".to_string(),
+            ));
+        }
         ReasonCode::Success => {
             tracing::info!("CLIENT: Re-authentication completed successfully");
         }
