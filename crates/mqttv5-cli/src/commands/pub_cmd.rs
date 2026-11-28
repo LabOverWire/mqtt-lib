@@ -422,7 +422,10 @@ async fn configure_tls_certs(
             None
         };
 
-        client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+        client
+            .set_tls_config(cert_pem, key_pem, ca_pem)
+            .await
+            .context("Failed to load TLS certificates")?;
     }
     Ok(())
 }

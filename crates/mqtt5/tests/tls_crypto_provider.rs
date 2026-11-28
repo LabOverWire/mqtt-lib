@@ -74,7 +74,8 @@ impl Pki {
                 Some(self.client_key_pem.clone()),
                 Some(self.ca_pem.clone()),
             )
-            .await;
+            .await
+            .unwrap();
         client
     }
 }

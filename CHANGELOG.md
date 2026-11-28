@@ -7,10 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
+
 ### Fixed
 
 - **The wasm broker answers an AUTH with another authentication method after CONNACK with DISCONNECT Protocol Error** (#358). It sent DISCONNECT with Bad Authentication Method, which is not a DISCONNECT reason code (MQTT-3.14.2-1). During the authentication that a CONNECT starts, such an AUTH still gets a CONNACK with Bad Authentication Method. On an MQTT 3.1.1 connection, which has no DISCONNECT from the server, an AUTH now closes the connection with nothing sent.
 - **A wasm broker re-authentication can be started again before it completes** (#358). An AUTH with Re-authenticate sent during an unfinished re-authentication got DISCONNECT with Protocol Error. It now starts a new exchange, since a client may start a re-authentication at any time after CONNACK (MQTT-4.12.1-1), as on the native broker.
+- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
 - **TLS no longer panics in a program that also enables rustls's default features** (#298). `mqtt5` enables rustls's `ring` feature, and a crate that depends on rustls with its default features adds `aws-lc-rs`, so rustls could not choose a process-level `CryptoProvider` and `connect` to an mqtts:// or wss:// address, a broker with a TLS, WebSocket TLS or mutual TLS QUIC listener, and a JWKS fetch panicked unless the program called `CryptoProvider::install_default()` first. Every rustls configuration the crate builds, for the TLS and WebSocket clients, the TLS and QUIC acceptors and the JWKS fetch, now names the ring provider, as the QUIC client already did, so no process-level provider is needed. A wss:// connection without a TLS configuration now builds its client configuration in the crate, from the platform's root certificates as tokio-tungstenite did. A process-level provider that a program installs is no longer used by these configurations; they always use ring.
 
 ## [mqtt5 0.51.1] - 2026-11-26
