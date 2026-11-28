@@ -468,7 +468,7 @@ impl WasmClientHandler {
         Ok(())
     }
 
-    fn set_server_capability_properties(&self, connack: &mut ConnAckPacket) {
+    fn set_server_capability_properties(&mut self, connack: &mut ConnAckPacket) {
         if let Some(granted) = self.advertised_session_expiry {
             connack.properties.set_session_expiry_interval(granted);
         }
@@ -485,6 +485,7 @@ impl WasmClientHandler {
             connack
                 .properties
                 .set_topic_alias_maximum(config.topic_alias_maximum);
+            self.topic_alias_maximum = config.topic_alias_maximum;
             connack
                 .properties
                 .set_wildcard_subscription_available(config.wildcard_subscription_available);
