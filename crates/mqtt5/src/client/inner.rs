@@ -1348,7 +1348,7 @@ mod tests {
             "/../../test_certs/ca.pem"
         ))
         .unwrap();
-        client.set_tls_config(None, None, Some(ca)).await;
+        client.set_tls_config(None, None, Some(ca)).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         drop(silent);
         assert!(client.tls_config.read().await.config.is_some());

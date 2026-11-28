@@ -1,5 +1,6 @@
 //! Builder patterns and factory methods for MQTT client
 
+use crate::error::{MqttError, Result};
 use crate::types::ConnectOptions;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -149,53 +150,46 @@ impl MqttClient {
         self.transport_config.write().await.enable_early_data = enable;
     }
 
+    /// Stores the client certificate, key and CA used by later `mqtts://`,
+    /// `wss://` and `quics://` connections made from a URL
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the certificate, key or CA does not load, or when
+    /// only one of the certificate and key is given. The configuration stored
+    /// before stays in force.
     pub async fn set_tls_config(
         &self,
         cert_pem: Option<Vec<u8>>,
         key_pem: Option<Vec<u8>>,
         ca_cert_pem: Option<Vec<u8>>,
-    ) {
+    ) -> Result<()> {
         use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-        tracing::debug!(
-            "set_tls_config called - cert: {}, key: {}, ca: {}",
-            cert_pem.is_some(),
-            key_pem.is_some(),
-            ca_cert_pem.is_some()
-        );
-
-        let mut config_lock = self.tls_config.write().await;
-        let placeholder_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
-
-        if cert_pem.is_some() || key_pem.is_some() || ca_cert_pem.is_some() {
-            let mut config = TlsConfig::new(placeholder_addr, "placeholder");
-
-            if let (Some(cert), Some(key)) = (cert_pem, key_pem) {
-                if let Err(e) = config.load_client_cert_pem_bytes(&cert) {
-                    tracing::error!("Failed to load client certificate: {e}");
-                    return;
-                }
-                if let Err(e) = config.load_client_key_pem_bytes(&key) {
-                    tracing::error!("Failed to load client key: {e}");
-                    return;
-                }
-                tracing::debug!("Loaded client cert and key");
-            }
-
-            if let Some(ca_cert) = ca_cert_pem {
-                if let Err(e) = config.load_ca_cert_pem_bytes(&ca_cert) {
-                    tracing::error!("Failed to load CA certificate: {e}");
-                    return;
-                }
-                config.use_system_roots = false;
-                tracing::debug!(
-                    "Loaded CA cert, use_system_roots=false, has {} certs",
-                    config.root_certs.as_ref().map_or(0, Vec::len)
-                );
-            }
-
-            config_lock.store(config);
-            tracing::debug!("TLS config stored");
+        if cert_pem.is_none() && key_pem.is_none() && ca_cert_pem.is_none() {
+            return Ok(());
         }
+
+        let placeholder_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let mut config = TlsConfig::new(placeholder_addr, "placeholder");
+        match (cert_pem, key_pem) {
+            (Some(cert), Some(key)) => {
+                config.load_client_cert_pem_bytes(&cert)?;
+                config.load_client_key_pem_bytes(&key)?;
+            }
+            (None, None) => {}
+            _ => {
+                return Err(MqttError::Configuration(
+                    "client certificate and key must be given together".to_string(),
+                ));
+            }
+        }
+        if let Some(ca_cert) = ca_cert_pem {
+            config.load_ca_cert_pem_bytes(&ca_cert)?;
+            config.use_system_roots = false;
+        }
+
+        self.tls_config.write().await.store(config);
+        Ok(())
     }
 }
