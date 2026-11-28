@@ -7,16 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The wasm broker resolves inbound Topic Aliases** (#249). It advertised a Topic Alias Maximum but routed an aliased PUBLISH as received: the alias reached subscribers, and a PUBLISH with an empty topic went out with no topic, so a subscriber read it on whichever topic it last saw for that alias. Each connection now maps an alias to its topic, resolves an empty topic from the alias, checks authorization and routes on that topic, and removes the Topic Alias before delivery (MQTT-3.3.2-12), as on the native broker. Alias 0, an alias above the advertised maximum, or an unknown alias with an empty topic gets DISCONNECT with Topic Alias Invalid, and an empty topic without an alias gets DISCONNECT with Protocol Error.
+
+## [mqtt5 0.52.0] - 2026-11-27
+
 ### Breaking
 
 - **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
 
 ### Fixed
 
-- **The wasm broker resolves inbound Topic Aliases** (#249). It advertised a Topic Alias Maximum but routed an aliased PUBLISH as received: the alias reached subscribers, and a PUBLISH with an empty topic went out with no topic, so a subscriber read it on whichever topic it last saw for that alias. Each connection now maps an alias to its topic, resolves an empty topic from the alias, checks authorization and routes on that topic, and removes the Topic Alias before delivery (MQTT-3.3.2-12), as on the native broker. Alias 0, an alias above the advertised maximum, or an unknown alias with an empty topic gets DISCONNECT with Topic Alias Invalid, and an empty topic without an alias gets DISCONNECT with Protocol Error.
+- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
+
+## [mqttv5-cli 0.29.14] - 2026-11-27
+
+### Fixed
+
+- **`mqttv5 pub`, `sub` and `bench` fail when `--ca-cert`, `--cert` or `--key` does not load, and `bench --mode connections` fails before it starts its workers** (see mqtt5 0.52.0).
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
+
+## [mqtt5-wasm 2.1.12] - 2026-11-27
+
+### Fixed
+
 - **The wasm broker answers an AUTH with another authentication method after CONNACK with DISCONNECT Protocol Error** (#358). It sent DISCONNECT with Bad Authentication Method, which is not a DISCONNECT reason code (MQTT-3.14.2-1). During the authentication that a CONNECT starts, such an AUTH still gets a CONNACK with Bad Authentication Method. On an MQTT 3.1.1 connection, which has no DISCONNECT from the server, an AUTH now closes the connection with nothing sent.
 - **A wasm broker re-authentication can be started again before it completes** (#358). An AUTH with Re-authenticate sent during an unfinished re-authentication got DISCONNECT with Protocol Error. It now starts a new exchange, since a client may start a re-authentication at any time after CONNACK (MQTT-4.12.1-1), as on the native broker.
-- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
 
 ## [mqtt5 0.51.1] - 2026-11-26
 
