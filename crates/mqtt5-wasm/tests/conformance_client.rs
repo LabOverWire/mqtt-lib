@@ -951,6 +951,25 @@ async fn mqtt_4_4_0_1_unacknowledged_messages_resent_on_session_resume() {
     settle(&third).await.unwrap();
 }
 
+async fn published_ids<const N: usize>(broker: &FakeBroker) -> [u16; N] {
+    let mut ids = [0; N];
+    for id in &mut ids {
+        *id = expect_publish(broker).await.packet_id.unwrap();
+    }
+    ids
+}
+
+async fn pubrel_ids<const N: usize>(broker: &FakeBroker) -> [u16; N] {
+    let mut ids = [0; N];
+    for id in &mut ids {
+        match broker.next_non_ping().await.packet {
+            Packet::PubRel(pubrel) => *id = pubrel.packet_id,
+            other => panic!("expected PUBREL, got {other:?}"),
+        }
+    }
+    ids
+}
+
 #[wasm_bindgen_test]
 async fn mqtt_4_6_0_4_resent_pubrels_follow_pubrec_order() {
     let client = Rc::new(WasmMqttClient::new("pubrel-order".to_string()));
@@ -961,21 +980,12 @@ async fn mqtt_4_6_0_4_resent_pubrels_follow_pubrec_order() {
         publish_with(&client, "b", b"2", publish_options(2)),
         publish_with(&client, "c", b"3", publish_options(2)),
     ];
-    let mut ids = Vec::new();
-    for _ in 0..3 {
-        ids.push(expect_publish(&broker).await.packet_id.unwrap());
-    }
+    let ids: [u16; 3] = published_ids(&broker).await;
     let pubrec_order = [ids[2], ids[0], ids[1]];
     for id in pubrec_order {
         broker.send(&PubRecPacket::new(id));
     }
-    let mut live = Vec::new();
-    for _ in 0..3 {
-        match broker.next_non_ping().await.packet {
-            Packet::PubRel(pubrel) => live.push(pubrel.packet_id),
-            other => panic!("expected PUBREL, got {other:?}"),
-        }
-    }
+    let live: [u16; 3] = pubrel_ids(&broker).await;
     assert_eq!(live, pubrec_order, "[MQTT-4.6.0-4] live PUBRELs");
     broker.send(&PubCompPacket::new(ids[0]));
     sleep(50).await;
@@ -988,13 +998,7 @@ async fn mqtt_4_6_0_4_resent_pubrels_follow_pubrec_order() {
     )
     .await;
     result.unwrap();
-    let mut resent = Vec::new();
-    for _ in 0..2 {
-        match broker.next_non_ping().await.packet {
-            Packet::PubRel(pubrel) => resent.push(pubrel.packet_id),
-            other => panic!("expected PUBREL, got {other:?}"),
-        }
-    }
+    let resent: [u16; 2] = pubrel_ids(&broker).await;
     assert_eq!(
         resent,
         [ids[2], ids[1]],
@@ -1002,6 +1006,45 @@ async fn mqtt_4_6_0_4_resent_pubrels_follow_pubrec_order() {
         ids[0]
     );
     broker.send(&PubCompPacket::new(ids[2]));
+    broker.send(&PubCompPacket::new(ids[1]));
+    for outcome in &outcomes {
+        settle(outcome).await.unwrap();
+    }
+}
+
+#[wasm_bindgen_test]
+async fn mqtt_4_6_0_4_a_repeated_pubrec_keeps_the_first_pubrec_order() {
+    let client = Rc::new(WasmMqttClient::new("pubrel-repeated-pubrec".to_string()));
+    let (broker, result, _) = open_session(&client, persistent_session_options(), success()).await;
+    result.unwrap();
+    let outcomes = [
+        publish_with(&client, "a", b"1", publish_options(2)),
+        publish_with(&client, "b", b"2", publish_options(2)),
+    ];
+    let ids: [u16; 2] = published_ids(&broker).await;
+    for id in [ids[0], ids[1], ids[0]] {
+        broker.send(&PubRecPacket::new(id));
+    }
+    let live: [u16; 3] = pubrel_ids(&broker).await;
+    assert_eq!(
+        live,
+        [ids[0], ids[1], ids[0]],
+        "a PUBREL answers every PUBREC"
+    );
+    lose_connection(&client, &broker).await;
+    let (broker, result, _) = open_session(
+        &client,
+        persistent_session_options(),
+        ConnAckPacket::new(true, ReasonCode::Success),
+    )
+    .await;
+    result.unwrap();
+    let resent: [u16; 2] = pubrel_ids(&broker).await;
+    assert_eq!(
+        resent, ids,
+        "[MQTT-4.6.0-4] a repeated PUBREC moved its PUBREL behind a later one"
+    );
+    broker.send(&PubCompPacket::new(ids[0]));
     broker.send(&PubCompPacket::new(ids[1]));
     for outcome in &outcomes {
         settle(outcome).await.unwrap();
