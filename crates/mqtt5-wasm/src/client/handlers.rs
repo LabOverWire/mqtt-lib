@@ -405,7 +405,7 @@ fn handle_pubrec(state: &Rc<RefCell<ClientState>>, packet_id: u16, reason_code: 
         let failed = u8::from(reason_code) >= 0x80;
         match state_mut.outbound.get_mut(&packet_id) {
             Some(flight) if flight.publish.qos == QoS::ExactlyOnce && !failed => {
-                flight.released = true;
+                state_mut.release_flight(packet_id);
                 PubRecOutcome::Release
             }
             Some(flight) if flight.publish.qos == QoS::ExactlyOnce && !flight.released => {
