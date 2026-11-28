@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The wasm broker resolves inbound Topic Aliases** (#249). It advertised a Topic Alias Maximum but routed an aliased PUBLISH as received: the alias reached subscribers, and a PUBLISH with an empty topic went out with no topic, so a subscriber read it on whichever topic it last saw for that alias. Each connection now accepts aliases up to the maximum it was given in CONNACK (MQTT-3.3.2-12), maps an alias to its topic, resolves an empty topic from the alias, checks authorization and routes on that topic, and removes the Topic Alias before delivery (MQTT-3.3.2-11), as on the native broker. Alias 0, an alias above the advertised maximum, or an unknown alias with an empty topic gets DISCONNECT with Topic Alias Invalid, and an empty topic without an alias gets DISCONNECT with Protocol Error.
 - **The periodic storage cleanup no longer loses an inflight record written while it runs** (#362). It removed a client's inflight directory when it found it empty, and the storage writer could create its temp file in that directory just after the removal, so the write failed and a QoS 1 or 2 flow whose record was lost was not resumed after a restart. The cleanup now asks the storage writer to remove an empty directory, and the writer does it between its own writes.
 
 ## [mqtt5 0.52.0] - 2026-11-27
