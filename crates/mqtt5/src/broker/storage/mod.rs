@@ -239,6 +239,69 @@ fn default_protocol_version() -> u8 {
     5
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SubscriptionKey {
+    pub topic_filter: String,
+    pub flow_id: Option<u64>,
+}
+
+impl SubscriptionKey {
+    #[must_use]
+    pub fn new(topic_filter: impl Into<String>, flow_id: Option<u64>) -> Self {
+        Self {
+            topic_filter: topic_filter.into(),
+            flow_id,
+        }
+    }
+}
+
+mod stored_subscriptions {
+    use super::{StoredSubscription, SubscriptionKey};
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::collections::HashMap;
+
+    fn flow_suffix(flow_id: u64) -> String {
+        format!("\u{0}{flow_id}")
+    }
+
+    pub fn serialize<S: Serializer>(
+        subscriptions: &HashMap<SubscriptionKey, StoredSubscription>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(subscriptions.len()))?;
+        for (key, subscription) in subscriptions {
+            match key.flow_id {
+                None => map.serialize_entry(&key.topic_filter, subscription)?,
+                Some(flow_id) => map.serialize_entry(
+                    &format!("{}{}", key.topic_filter, flow_suffix(flow_id)),
+                    subscription,
+                )?,
+            }
+        }
+        map.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<SubscriptionKey, StoredSubscription>, D::Error> {
+        let stored = HashMap::<String, StoredSubscription>::deserialize(deserializer)?;
+        Ok(stored
+            .into_iter()
+            .map(|(stored_key, subscription)| {
+                let topic_filter = subscription
+                    .flow_id
+                    .and_then(|flow_id| stored_key.strip_suffix(&flow_suffix(flow_id)))
+                    .map_or_else(|| stored_key.clone(), str::to_string);
+                (
+                    SubscriptionKey::new(topic_filter, subscription.flow_id),
+                    subscription,
+                )
+            })
+            .collect())
+    }
+}
+
 impl StoredSubscription {
     #[must_use]
     pub fn new(qos: QoS) -> Self {
@@ -266,7 +329,8 @@ pub struct ClientSession {
     /// Session expiry interval in seconds
     pub expiry_interval: Option<u32>,
     /// Active subscriptions with full options
-    pub subscriptions: HashMap<String, StoredSubscription>,
+    #[serde(with = "stored_subscriptions")]
+    pub subscriptions: HashMap<SubscriptionKey, StoredSubscription>,
     /// Session creation time
     #[serde(skip, default = "SystemTime::now")]
     pub created_at: SystemTime,
@@ -939,23 +1003,31 @@ impl ClientSession {
         topic_filter: impl Into<String>,
         subscription: StoredSubscription,
     ) {
-        self.subscriptions.insert(topic_filter.into(), subscription);
+        self.subscriptions.insert(
+            SubscriptionKey::new(topic_filter, subscription.flow_id),
+            subscription,
+        );
     }
 
     /// Remove subscription from session
-    pub fn remove_subscription(&mut self, topic_filter: &str) {
-        self.subscriptions.remove(topic_filter);
+    pub fn remove_subscription(&mut self, topic_filter: &str, flow_id: Option<u64>) {
+        self.subscriptions
+            .remove(&SubscriptionKey::new(topic_filter, flow_id));
     }
 
-    /// Follows the router after one flow's subscription to `topic_filter` was removed: the
-    /// session keeps the subscription, with its instance, on the flow the router still holds it
-    /// on (`held`), or removes it when the router holds it on none.
-    pub fn follow_removed_subscription(&mut self, topic_filter: &str, held: Option<Option<u64>>) {
-        match (held, self.subscriptions.get_mut(topic_filter)) {
-            (Some(flow_id), Some(subscription)) => subscription.flow_id = flow_id,
-            (None, _) => self.remove_subscription(topic_filter),
-            (Some(_), None) => {}
-        }
+    #[must_use]
+    pub fn subscription(
+        &self,
+        topic_filter: &str,
+        flow_id: Option<u64>,
+    ) -> Option<&StoredSubscription> {
+        self.subscriptions
+            .get(&SubscriptionKey::new(topic_filter, flow_id))
+    }
+
+    pub fn remove_flow_subscriptions(&mut self, flow_id: u64) {
+        self.subscriptions
+            .retain(|key, _| key.flow_id != Some(flow_id));
     }
 
     /// Whether a message routed for the subscription `instance` on `topic` may be sent: when the
@@ -968,36 +1040,30 @@ impl ClientSession {
                 .subscriptions
                 .values()
                 .any(|subscription| subscription.instance == instance),
-            None => self
-                .subscriptions
-                .keys()
-                .any(|filter| topic_matches_filter(topic, parse_shared_subscription(filter).0)),
+            None => self.subscriptions.keys().any(|key| {
+                topic_matches_filter(topic, parse_shared_subscription(&key.topic_filter).0)
+            }),
         }
     }
 
-    /// The instance for a subscription to `topic_filter` being accepted: the one the session
-    /// already holds for that filter, whatever flow it is on, or a new one. The router keeps a
-    /// subscription per flow while the session keeps one per filter, so a filter subscribed on
-    /// another flow keeps the instance its first subscription is still routed with.
     #[must_use]
-    pub fn subscription_instance(&self, topic_filter: &str) -> u64 {
-        self.subscriptions
-            .get(topic_filter)
+    pub fn subscription_instance(&self, topic_filter: &str, flow_id: Option<u64>) -> u64 {
+        self.subscription(topic_filter, flow_id)
             .filter(|held| held.instance != 0)
             .map_or_else(|| self.new_subscription_instance(), |held| held.instance)
     }
 
     /// Gives every subscription stored without an instance a new one.
     pub fn assign_subscription_instances(&mut self) {
-        let unassigned: Vec<String> = self
+        let unassigned: Vec<SubscriptionKey> = self
             .subscriptions
             .iter()
             .filter(|(_, subscription)| subscription.instance == 0)
-            .map(|(filter, _)| filter.clone())
+            .map(|(key, _)| key.clone())
             .collect();
-        for filter in unassigned {
+        for key in unassigned {
             let instance = self.new_subscription_instance();
-            if let Some(subscription) = self.subscriptions.get_mut(&filter) {
+            if let Some(subscription) = self.subscriptions.get_mut(&key) {
                 subscription.instance = instance;
             }
         }
