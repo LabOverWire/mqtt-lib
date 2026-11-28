@@ -99,7 +99,7 @@ async fn test_session_persistence() {
     let retrieved_session = retrieved.unwrap();
     assert_eq!(retrieved_session.subscriptions.len(), 2);
 
-    let sub = retrieved_session.subscriptions.get("test/+").unwrap();
+    let sub = retrieved_session.subscription("test/+", None).unwrap();
     assert_eq!(sub.qos, QoS::AtLeastOnce);
     assert!(sub.no_local);
     assert!(sub.retain_as_published);
@@ -107,12 +107,12 @@ async fn test_session_persistence() {
     assert_eq!(sub.subscription_id, Some(42));
     assert_eq!(sub.instance, 42);
 
-    let sub2 = retrieved_session.subscriptions.get("sensors/#").unwrap();
+    let sub2 = retrieved_session.subscription("sensors/#", None).unwrap();
     assert_eq!(sub2.qos, QoS::ExactlyOnce);
     assert!(!sub2.no_local);
     assert!(!sub2.retain_as_published);
 
-    session.remove_subscription("test/+");
+    session.remove_subscription("test/+", None);
     storage.store_session(session.clone()).await;
 
     let retrieved = storage.get_session("client1").await.unwrap();
@@ -873,17 +873,84 @@ fn a_session_delivers_by_instance_or_for_none_by_filter() {
     session.add_subscription("a/+", StoredSubscription::new(QoS::AtLeastOnce));
     session.add_subscription("$share/g/b/x", StoredSubscription::new(QoS::AtLeastOnce));
     session.assign_subscription_instances();
-    let held = session.subscriptions["a/+"].instance;
+    let held = session.subscription("a/+", None).unwrap().instance;
     assert_ne!(held, 0);
-    assert_ne!(held, session.subscriptions["$share/g/b/x"].instance);
+    assert_ne!(
+        held,
+        session.subscription("$share/g/b/x", None).unwrap().instance
+    );
     assert!(session.delivers(Some(held), "anything"));
     assert!(!session.delivers(Some(held.wrapping_add(1)), "a/x"));
     assert!(session.delivers(None, "a/x"));
     assert!(session.delivers(None, "b/x"));
     assert!(!session.delivers(None, "c/x"));
-    assert_eq!(session.subscription_instance("a/+"), held);
-    assert_ne!(session.subscription_instance("c/+"), 0);
-    assert_ne!(session.subscription_instance("c/+"), held);
+    assert_eq!(session.subscription_instance("a/+", None), held);
+    assert_ne!(session.subscription_instance("c/+", None), 0);
+    assert_ne!(session.subscription_instance("c/+", None), held);
+}
+
+fn on_flow(flow_id: Option<u64>, instance: u64) -> StoredSubscription {
+    let mut subscription = StoredSubscription::new(QoS::AtLeastOnce);
+    subscription.flow_id = flow_id;
+    subscription.instance = instance;
+    subscription
+}
+
+#[test]
+fn a_session_keeps_one_subscription_per_filter_and_flow_across_a_store() {
+    let mut session = ClientSession::new("c", true, Some(60));
+    session.add_subscription("t", on_flow(Some(1), 11));
+    session.add_subscription("t", on_flow(Some(2), 12));
+    session.add_subscription("t", on_flow(None, 13));
+    session.add_subscription("u", on_flow(Some(1), 14));
+    let loaded: ClientSession =
+        serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+    assert_eq!(loaded.subscriptions.len(), 4);
+    let instance = |filter: &str, flow_id| {
+        loaded
+            .subscription(filter, flow_id)
+            .map(|sub| (sub.flow_id, sub.instance))
+    };
+    assert_eq!(instance("t", Some(1)), Some((Some(1), 11)));
+    assert_eq!(instance("t", Some(2)), Some((Some(2), 12)));
+    assert_eq!(instance("t", None), Some((None, 13)));
+    assert_eq!(instance("u", Some(1)), Some((Some(1), 14)));
+    let mut removed = loaded;
+    removed.remove_subscription("t", Some(1));
+    assert!(removed.subscription("t", Some(2)).is_some());
+    removed.remove_flow_subscriptions(2);
+    assert!(removed.subscription("t", Some(2)).is_none());
+    assert!(removed.subscription("t", None).is_some());
+    assert!(removed.subscription("u", Some(1)).is_some());
+}
+
+#[test]
+fn a_session_stored_with_one_subscription_per_filter_still_loads() {
+    let legacy = serde_json::json!({
+        "client_id": "legacy",
+        "persistent": true,
+        "expiry_interval": 60,
+        "subscriptions": {
+            "plain/t": {"qos": "AtLeastOnce", "no_local": false, "retain_as_published": false, "subscription_id": null},
+            "flow/t": {"qos": "AtMostOnce", "no_local": false, "retain_as_published": false, "subscription_id": null, "flow_id": 7, "instance": 5}
+        },
+        "will_message": null,
+        "will_delay_interval": null
+    });
+    let loaded: ClientSession = serde_json::from_value(legacy).unwrap();
+    assert_eq!(loaded.subscriptions.len(), 2);
+    assert_eq!(
+        loaded.subscription("plain/t", None).map(|sub| sub.qos),
+        Some(QoS::AtLeastOnce)
+    );
+    assert_eq!(
+        loaded
+            .subscription("flow/t", Some(7))
+            .map(|sub| sub.instance),
+        Some(5)
+    );
+    let stored = serde_json::to_value(&loaded).unwrap();
+    assert!(stored["subscriptions"]["plain/t"].is_object());
 }
 
 fn expiring_publish(packet_id: u16, interval: u32) -> PublishPacket {
