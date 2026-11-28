@@ -130,7 +130,7 @@ async fn delayed_relay(front_port: u16, target_port: u16) -> tokio::task::JoinHa
 
 async fn connect(url: &str, ca: Vec<u8>, id: &str) -> mqtt5::error::Result<()> {
     let client = MqttClient::new(id);
-    client.set_tls_config(None, None, Some(ca)).await;
+    client.set_tls_config(None, None, Some(ca)).await.unwrap();
     let outcome = tokio::time::timeout(
         Duration::from_secs(20),
         client.connect_with_options(url, ConnectOptions::new(id).with_automatic_reconnect(false)),

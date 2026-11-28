@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
+
 ### Fixed
 
+- **The wasm broker answers an AUTH with another authentication method after CONNACK with DISCONNECT Protocol Error** (#358). It sent DISCONNECT with Bad Authentication Method, which is not a DISCONNECT reason code (MQTT-3.14.2-1). During the authentication that a CONNECT starts, such an AUTH still gets a CONNACK with Bad Authentication Method. On an MQTT 3.1.1 connection, which has no DISCONNECT from the server, an AUTH now closes the connection with nothing sent.
+- **A wasm broker re-authentication can be started again before it completes** (#358). An AUTH with Re-authenticate sent during an unfinished re-authentication got DISCONNECT with Protocol Error. It now starts a new exchange, since a client may start a re-authentication at any time after CONNACK (MQTT-4.12.1-1), as on the native broker.
+- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
 - **An `unsubscribe` that is cancelled while it waits for its UNSUBACK releases its packet identifier** (#361). Dropping the call, for example with a timeout around it, left the identifier reserved until the next reconnect, so repeated cancelled unsubscribes against a server that answers slowly used up all 65535 identifiers and every later subscribe or unsubscribe failed with `PacketIdExhausted`. The identifier is now released when the call ends, however it ends, as a cancelled subscribe already did. An UNSUBACK that arrives after the call was cancelled is ignored.
 
 ## [mqtt5 0.51.1] - 2026-11-26

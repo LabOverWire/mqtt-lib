@@ -129,7 +129,7 @@ async fn ipv6_relay(
 
 async fn connect(url: &str, ca: Vec<u8>, id: &str) -> (mqtt5::error::Result<()>, Duration) {
     let client = MqttClient::new(id);
-    client.set_tls_config(None, None, Some(ca)).await;
+    client.set_tls_config(None, None, Some(ca)).await.unwrap();
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(20),

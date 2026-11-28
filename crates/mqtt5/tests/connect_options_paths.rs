@@ -249,7 +249,10 @@ async fn enhanced_auth_works_through_connect_with_tls_and_options() {
     };
     let control = MqttClient::new("enhanced");
     control.set_auth_handler(Answering).await;
-    control.set_tls_config(None, None, Some(trusted_ca())).await;
+    control
+        .set_tls_config(None, None, Some(trusted_ca()))
+        .await
+        .unwrap();
     let over_url = control
         .connect_with_options(&format!("mqtts://localhost:{port}"), options())
         .await
@@ -279,7 +282,10 @@ async fn connect_with_tls_and_options_refuses_deferred_ack_without_a_persistent_
             .with_deferred_ack(true)
     };
     let control = MqttClient::new("deferred");
-    control.set_tls_config(None, None, Some(trusted_ca())).await;
+    control
+        .set_tls_config(None, None, Some(trusted_ca()))
+        .await
+        .unwrap();
     let over_url = control
         .connect_with_options(&format!("mqtts://localhost:{port}"), invalid())
         .await

@@ -105,7 +105,10 @@ async fn a_disconnect_during_a_tls_reconnection_handshake_leaves_the_client_disc
     let (upstream, broker) = tls_broker().await;
     let proxy_addr = unused_address().await;
     let client = MqttClient::with_options(reconnecting("tls-disconnect-during-reconnection"));
-    client.set_tls_config(None, None, Some(trusted_ca())).await;
+    client
+        .set_tls_config(None, None, Some(trusted_ca()))
+        .await
+        .unwrap();
     let url = format!("mqtts://localhost:{}", proxy_addr.port());
     client
         .connect(&url)
