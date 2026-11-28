@@ -1008,6 +1008,16 @@ mod tests {
             self.inbox.borrow().clone()
         }
 
+        async fn wait_for_deliveries(&self, count: usize) -> Vec<(char, bool, Vec<u8>)> {
+            for _ in 0..300 {
+                if deliveries(&self.received()).len() >= count {
+                    break;
+                }
+                sleep(10).await;
+            }
+            deliveries(&self.received())
+        }
+
         fn received(&self) -> Vec<u8> {
             self.inbox.borrow().clone()
         }
@@ -3040,6 +3050,15 @@ mod tests {
         );
     }
 
+    fn disconnect_count(broker: &WasmBroker) -> Rc<std::cell::Cell<u32>> {
+        let count = Rc::new(std::cell::Cell::new(0));
+        let counter = Rc::clone(&count);
+        let callback =
+            Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| counter.set(counter.get() + 1));
+        broker.on_client_disconnect(callback.into_js_value().unchecked_into());
+        count
+    }
+
     fn deliveries(bytes: &[u8]) -> Vec<(char, bool, Vec<u8>)> {
         publish_frames(bytes)
             .iter()
@@ -3099,10 +3118,17 @@ mod tests {
             .iter()
             .map(|(_, body)| publish_packet_id(body))
             .collect();
+        let disconnects = disconnect_count(&broker);
         let second = connected(&broker, connect_options("ended", false, 3600)).await;
         sleep(100).await;
+        let before_close = disconnects.get();
         second.port.close();
-        sleep(300).await;
+        for _ in 0..300 {
+            if disconnects.get() > before_close {
+                break;
+            }
+            sleep(10).await;
+        }
         gate.add_permits(100);
         sleep(300).await;
         let mut stored: Vec<u16> = broker
@@ -3115,8 +3141,7 @@ mod tests {
             .collect();
         stored.sort_unstable();
         let third = start_connect(&broker, connect_options("ended", false, 3600));
-        sleep(300).await;
-        let on_third = deliveries(&third.received());
+        let on_third = third.wait_for_deliveries(3).await;
         drop(first);
         assert_eq!(
             (stored, on_third),

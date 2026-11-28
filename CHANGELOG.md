@@ -7,17 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `mqtt5` client subscribes again on a resumed session when its last resubscribe was cut off** (#353). After a connection without a session, the client sends its stored subscriptions again. When that connection closed before their SUBACKs, the next connection that the server answered with Session Present 1 restored only the local callbacks, so the server never held the subscriptions and nothing was delivered for them. The same happened after `connect_with_options` with another client identifier. The client now remembers that a resubscribe has not settled, and the next connection sends the stored subscriptions, deferred-ack ones included, whatever its Session Present says. A resubscribe stays unsettled while one of its SUBSCRIBEs was not sent or got no SUBACK; a refused one settles.
+- **A refused subscribe to a filter keeps the callback of an accepted subscription to it** (#365). A test now covers it: a second `subscribe` to a filter that the server refuses leaves the first callback in place, and it receives the filter's messages after a reconnect. The fix shipped with the change that made a failed or cancelled subscribe remove only its own callback in mqtt5 0.51.0 (see `MqttError::OutcomeUnknown` there).
+
+## [mqtt5 0.52.0] - 2026-11-27
+
 ### Breaking
 
 - **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
 
 ### Fixed
 
+- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
+
+## [mqttv5-cli 0.29.14] - 2026-11-27
+
+### Fixed
+
+- **`mqttv5 pub`, `sub` and `bench` fail when `--ca-cert`, `--cert` or `--key` does not load, and `bench --mode connections` fails before it starts its workers** (see mqtt5 0.52.0).
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
+
+## [mqtt5-wasm 2.1.12] - 2026-11-27
+
+### Fixed
+
 - **The wasm broker answers an AUTH with another authentication method after CONNACK with DISCONNECT Protocol Error** (#358). It sent DISCONNECT with Bad Authentication Method, which is not a DISCONNECT reason code (MQTT-3.14.2-1). During the authentication that a CONNECT starts, such an AUTH still gets a CONNACK with Bad Authentication Method. On an MQTT 3.1.1 connection, which has no DISCONNECT from the server, an AUTH now closes the connection with nothing sent.
 - **A wasm broker re-authentication can be started again before it completes** (#358). An AUTH with Re-authenticate sent during an unfinished re-authentication got DISCONNECT with Protocol Error. It now starts a new exchange, since a client may start a re-authentication at any time after CONNACK (MQTT-4.12.1-1), as on the native broker.
-- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
-- **The `mqtt5` client subscribes again on a resumed session when its last resubscribe was cut off** (#353). After a connection without a session, the client sends its stored subscriptions again. When that connection closed before their SUBACKs, the next connection that the server answered with Session Present 1 restored only the local callbacks, so the server never held the subscriptions and nothing was delivered for them. The same happened after `connect_with_options` with another client identifier. The client now remembers that a resubscribe has not settled, and the next connection sends the stored subscriptions, deferred-ack ones included, whatever its Session Present says. A resubscribe stays unsettled while one of its SUBSCRIBEs was not sent or got no SUBACK; a refused one settles.
-- **A refused subscribe to a filter keeps the callback of an accepted subscription to it** (#365). A test now covers it: a second `subscribe` to a filter that the server refuses leaves the first callback in place, and it receives the filter's messages after a reconnect. The fix shipped with the change that made a failed or cancelled subscribe remove only its own callback in mqtt5 0.51.0 (see `MqttError::OutcomeUnknown` there).
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
 
 ## [mqtt5 0.51.1] - 2026-11-26
 
