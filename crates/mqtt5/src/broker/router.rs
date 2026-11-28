@@ -958,8 +958,8 @@ impl MessageRouter {
                 session
                     .subscriptions
                     .iter()
-                    .map(|(filter, stored)| {
-                        Self::stored_subscription_request(client_id, filter, stored)
+                    .map(|(key, stored)| {
+                        Self::stored_subscription_request(client_id, &key.topic_filter, stored)
                     })
                     .collect()
             })
@@ -1222,32 +1222,17 @@ impl MessageRouter {
         let Some(storage) = &self.storage else {
             return;
         };
-        let (token, on_flow) = match storage.get_session(client_id).await {
-            Ok(Some(session)) => (
-                session.connection_token,
-                session
-                    .subscriptions
-                    .iter()
-                    .filter(|(_, sub)| sub.flow_id == Some(flow_id))
-                    .map(|(filter, _)| filter.clone())
-                    .collect::<Vec<_>>(),
-            ),
+        let token = match storage.get_session(client_id).await {
+            Ok(Some(session)) => session.connection_token,
             Ok(None) => return,
             Err(e) => {
                 warn!("Failed to read session for {client_id} after a flow expired: {e}");
                 return;
             }
         };
-        let mut followed = Vec::with_capacity(on_flow.len());
-        for filter in on_flow {
-            let held = self.held_flow(client_id, &filter).await;
-            followed.push((filter, held));
-        }
         if let Err(e) = storage
             .update_session(client_id, token, move |session| {
-                for (filter, held) in &followed {
-                    session.follow_removed_subscription(filter, *held);
-                }
+                session.remove_flow_subscriptions(flow_id);
             })
             .await
         {
@@ -1479,24 +1464,6 @@ impl MessageRouter {
         } else {
             Unsubscribed::Absent
         }
-    }
-
-    /// The flow of a subscription `client_id` still holds to `topic_filter`, if it holds one on
-    /// any flow.
-    pub async fn held_flow(&self, client_id: &str, topic_filter: &str) -> Option<Option<u64>> {
-        let (actual_filter, share_group) = parse_shared_subscription(topic_filter);
-        let subscriptions = if Self::has_wildcards(actual_filter) {
-            &self.wildcard_subscriptions
-        } else {
-            &self.exact_subscriptions
-        };
-        subscriptions
-            .read()
-            .await
-            .get(actual_filter)?
-            .iter()
-            .find(|sub| sub.client_id == client_id && sub.share_group.as_deref() == share_group)
-            .map(|sub| sub.flow_id)
     }
 
     /// Removes every subscription the handler holding `generation` bound to `flow_id`;
@@ -2160,6 +2127,25 @@ impl MessageRouter {
         subs_map.get(actual_filter).is_some_and(|subs| {
             subs.iter()
                 .any(|sub| sub.client_id == client_id && sub.share_group.as_deref() == share_group)
+        })
+    }
+
+    pub async fn has_flow_subscription(
+        &self,
+        client_id: &str,
+        topic_filter: &str,
+        flow_id: Option<u64>,
+    ) -> bool {
+        let (actual_filter, share_group) = parse_shared_subscription(topic_filter);
+        let subscriptions = if Self::has_wildcards(actual_filter) {
+            &self.wildcard_subscriptions
+        } else {
+            &self.exact_subscriptions
+        };
+        let subs_map = subscriptions.read().await;
+        subs_map.get(actual_filter).is_some_and(|subs| {
+            subs.iter()
+                .any(|sub| sub.identity() == (client_id, share_group, flow_id))
         })
     }
 

@@ -343,7 +343,7 @@ async fn resume_racing_a_disconnect_with_expiry_zero_keeps_its_subscriptions() {
             resumed += 1;
             let stored_has_subscription = stored
                 .as_ref()
-                .is_some_and(|session| session.subscriptions.contains_key(&topic));
+                .is_some_and(|session| session.subscription(&topic, None).is_some());
             if !delivered || !stored_has_subscription {
                 inconsistent += 1;
             }

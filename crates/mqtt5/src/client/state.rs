@@ -108,6 +108,43 @@ impl ClientTransportType {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct UnsettledRestore {
+    rounds: u64,
+    unsettled: Option<u64>,
+}
+
+impl UnsettledRestore {
+    fn is_unsettled(&self) -> bool {
+        self.unsettled.is_some()
+    }
+
+    fn begin(&mut self) -> u64 {
+        self.rounds += 1;
+        self.unsettled = Some(self.rounds);
+        self.rounds
+    }
+
+    fn settle(&mut self, round: u64) {
+        if self.unsettled == Some(round) {
+            self.unsettled = None;
+        }
+    }
+}
+
+fn is_settled(restored: &Result<()>) -> bool {
+    !matches!(
+        restored,
+        Err(MqttError::NotConnected
+            | MqttError::OutcomeUnknown
+            | MqttError::Timeout
+            | MqttError::ConnectionError(_)
+            | MqttError::ConnectionClosedByPeer
+            | MqttError::ClientClosed
+            | MqttError::Io(_))
+    )
+}
+
 impl MqttClient {
     pub(crate) async fn trigger_connection_event(&self, event: ConnectionEvent) {
         super::fire_connection_event(&self.connection_event_callbacks, event).await;
@@ -126,64 +163,76 @@ impl MqttClient {
     pub(crate) async fn restore_subscriptions_after_connect(
         &self,
         stored_subs: Vec<StoredSubscription>,
-        session_present: bool,
+        session_resumed: bool,
     ) {
+        if session_resumed && !self.unsettled_restore.lock().is_unsettled() {
+            self.restore_callbacks(stored_subs).await;
+            return;
+        }
+        let round = self.unsettled_restore.lock().begin();
+        let plain_settled = self.resubscribe_stored(stored_subs).await;
+        let ack_settled = self.restore_ack_subscriptions_after_lost_session().await;
+        if plain_settled && ack_settled {
+            self.unsettled_restore.lock().settle(round);
+        }
+    }
+
+    async fn restore_callbacks(&self, stored_subs: Vec<StoredSubscription>) {
         if stored_subs.is_empty() {
             return;
         }
-
-        if session_present {
-            tracing::info!("Session resumed, restoring {} callbacks", stored_subs.len());
-            let inner = self.inner.read().await;
-            for (topic, _, _, callback_id) in stored_subs {
-                if !inner.callback_manager.restore_callback(callback_id) {
-                    tracing::warn!("Failed to restore callback for {topic}: not found in registry");
-                }
-            }
-        } else {
-            tracing::info!(
-                "Session not resumed, restoring {} subscriptions",
-                stored_subs.len()
-            );
-            for (topic, options, subscription_identifier, callback_id) in stored_subs {
-                if let Err(e) = self
-                    .resubscribe_internal(&topic, options, subscription_identifier, callback_id)
-                    .await
-                {
-                    tracing::warn!("Failed to restore subscription to {}: {}", topic, e);
-                }
+        tracing::info!("Session resumed, restoring {} callbacks", stored_subs.len());
+        let inner = self.inner.read().await;
+        for (topic, _, _, callback_id) in stored_subs {
+            if !inner.callback_manager.restore_callback(callback_id) {
+                tracing::warn!("Failed to restore callback for {topic}: not found in registry");
             }
         }
     }
 
-    /// Re-sends the SUBSCRIBE for every deferred-ack subscription after the broker reports no
-    /// session. `subscribe_with_ack` uses `SubscriptionPersistence::PersistAck`, which stores ack
-    /// subscriptions in `stored_ack_subscriptions` instead of `stored_subscriptions`, so the
-    /// regular restore path never touches them; without
-    /// this, a `session_present = 0` reconnect would leave the client silently unsubscribed from
-    /// its ack topics (the broker discarded the subscription with the session). The ack callback
-    /// is already registered in `AckCallbackManager` and survives the disconnect, so only the
-    /// SUBSCRIBE is resent — the regular `CallbackManager` (a distinct `CallbackId` space) is not
-    /// touched.
-    pub(crate) async fn restore_ack_subscriptions_after_lost_session(&self) {
+    async fn resubscribe_stored(&self, stored_subs: Vec<StoredSubscription>) -> bool {
+        if stored_subs.is_empty() {
+            return true;
+        }
+        tracing::info!(
+            "Session not resumed, restoring {} subscriptions",
+            stored_subs.len()
+        );
+        let mut settled = true;
+        for (topic, options, subscription_identifier, callback_id) in stored_subs {
+            let restored = self
+                .resubscribe_internal(&topic, options, subscription_identifier, callback_id)
+                .await;
+            if let Err(e) = &restored {
+                tracing::warn!("Failed to restore subscription to {}: {}", topic, e);
+            }
+            settled &= is_settled(&restored);
+        }
+        settled
+    }
+
+    async fn restore_ack_subscriptions_after_lost_session(&self) -> bool {
         let inner = self.inner.read().await;
         let subs = inner.stored_ack_subscriptions.lock().clone();
         drop(inner);
         if subs.is_empty() {
-            return;
+            return true;
         }
         tracing::info!(
             "Session not resumed, re-subscribing {} deferred-ack subscription(s)",
             subs.len()
         );
+        let mut settled = true;
         for (topic, options, subscription_identifier, callback_id) in subs {
-            if let Err(e) = self
+            let restored = self
                 .resubscribe_ack_internal(&topic, options, subscription_identifier, callback_id)
-                .await
-            {
+                .await;
+            if let Err(e) = &restored {
                 tracing::warn!("Failed to re-subscribe deferred-ack topic {topic}: {e}");
             }
+            settled &= is_settled(&restored);
         }
+        settled
     }
 
     async fn resubscribe_ack_internal(

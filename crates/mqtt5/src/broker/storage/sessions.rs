@@ -2,7 +2,7 @@
 //!
 //! Handles persistent client sessions and subscription storage.
 
-use super::{ClientSession, Storage, StorageBackend, StoredSubscription};
+use super::{ClientSession, Storage, StorageBackend, StoredSubscription, SubscriptionKey};
 use crate::error::Result;
 use std::collections::HashMap;
 use tracing::debug;
@@ -58,7 +58,7 @@ impl<B: StorageBackend + 'static> SessionManager<B> {
     pub async fn update_subscriptions(
         &self,
         client_id: &str,
-        subscriptions: HashMap<String, StoredSubscription>,
+        subscriptions: HashMap<SubscriptionKey, StoredSubscription>,
     ) {
         if let Some(mut session) = self.storage.get_session(client_id).await {
             session.subscriptions = subscriptions;
@@ -90,9 +90,14 @@ impl<B: StorageBackend + 'static> SessionManager<B> {
         }
     }
 
-    pub async fn remove_subscription(&self, client_id: &str, topic_filter: &str) {
+    pub async fn remove_subscription(
+        &self,
+        client_id: &str,
+        topic_filter: &str,
+        flow_id: Option<u64>,
+    ) {
         if let Some(mut session) = self.storage.get_session(client_id).await {
-            session.remove_subscription(topic_filter);
+            session.remove_subscription(topic_filter, flow_id);
             session.touch();
             debug!(
                 "Removed subscription {} for client: {}",
@@ -103,7 +108,10 @@ impl<B: StorageBackend + 'static> SessionManager<B> {
     }
 
     /// Get session subscriptions
-    pub async fn get_subscriptions(&self, client_id: &str) -> HashMap<String, StoredSubscription> {
+    pub async fn get_subscriptions(
+        &self,
+        client_id: &str,
+    ) -> HashMap<SubscriptionKey, StoredSubscription> {
         if let Some(session) = self.storage.get_session(client_id).await {
             session.subscriptions
         } else {

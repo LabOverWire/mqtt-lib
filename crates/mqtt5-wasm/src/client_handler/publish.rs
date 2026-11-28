@@ -1,6 +1,7 @@
 use mqtt5::broker::router::RoutableMessage;
 use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase, StorageBackend};
 use mqtt5_protocol::error::{MqttError, Result};
+use mqtt5_protocol::packet::disconnect::DisconnectPacket;
 use mqtt5_protocol::packet::puback::PubAckPacket;
 use mqtt5_protocol::packet::pubcomp::PubCompPacket;
 use mqtt5_protocol::packet::publish::PublishPacket;
@@ -21,7 +22,10 @@ impl WasmClientHandler {
         mut publish: PublishPacket,
         writer: &SharedWriter,
     ) -> Result<()> {
-        let client_id = self.client_id.as_ref().unwrap();
+        self.resolve_topic_alias(&mut publish, writer)?;
+        let client_id = self.client_id.as_ref().ok_or_else(|| {
+            MqttError::ProtocolError("no client id for this connection".to_string())
+        })?;
         self.stats.publish_received(publish.payload.len());
 
         let authorized = self
@@ -86,8 +90,9 @@ impl WasmClientHandler {
                     publish.retain,
                     payload_size,
                 );
+                let packet_id = Self::required_packet_id(&publish)?;
                 self.router.route_message(&publish, Some(client_id)).await;
-                let puback = PubAckPacket::new(publish.packet_id.unwrap());
+                let puback = PubAckPacket::new(packet_id);
                 Self::write_packet(&Packet::PubAck(puback), writer)?;
             }
             QoS::ExactlyOnce => {
@@ -98,7 +103,7 @@ impl WasmClientHandler {
                     publish.retain,
                     payload_size,
                 );
-                let packet_id = publish.packet_id.unwrap();
+                let packet_id = Self::required_packet_id(&publish)?;
                 let inflight = InflightMessage::from_publish(
                     &publish,
                     client_id.clone(),
@@ -115,6 +120,57 @@ impl WasmClientHandler {
         }
 
         Ok(())
+    }
+
+    fn resolve_topic_alias(
+        &mut self,
+        publish: &mut PublishPacket,
+        writer: &SharedWriter,
+    ) -> Result<()> {
+        let refusal = match publish.properties.get_topic_alias() {
+            Some(alias) if alias == 0 || alias > self.topic_alias_maximum => Some((
+                ReasonCode::TopicAliasInvalid,
+                format!(
+                    "Invalid topic alias: {alias} (maximum: {})",
+                    self.topic_alias_maximum
+                ),
+            )),
+            Some(alias) if publish.topic_name.is_empty() => match self.topic_aliases.get(&alias) {
+                Some(topic) => {
+                    publish.topic_name.clone_from(topic);
+                    None
+                }
+                None => Some((
+                    ReasonCode::TopicAliasInvalid,
+                    format!("Topic alias {alias} not found"),
+                )),
+            },
+            Some(alias) => {
+                self.topic_aliases.insert(alias, publish.topic_name.clone());
+                None
+            }
+            None if publish.topic_name.is_empty() => Some((
+                ReasonCode::ProtocolError,
+                "Empty topic name without topic alias".to_string(),
+            )),
+            None => None,
+        };
+        let Some((reason_code, message)) = refusal else {
+            publish.properties.remove_topic_alias();
+            return Ok(());
+        };
+        warn!(reason = ?reason_code, "{message}");
+        if self.protocol_version == 5 {
+            let disconnect = DisconnectPacket::new(reason_code);
+            Self::write_packet(&Packet::Disconnect(disconnect), writer)?;
+        }
+        Err(MqttError::ProtocolError(message))
+    }
+
+    fn required_packet_id(publish: &PublishPacket) -> Result<u16> {
+        publish
+            .packet_id
+            .ok_or_else(|| MqttError::MalformedPacket("Packet ID required for QoS > 0".to_string()))
     }
 
     fn reject_publish(
@@ -199,12 +255,20 @@ impl WasmClientHandler {
         pubrel: PubRelPacket,
         writer: &SharedWriter,
     ) -> Result<()> {
+        let client_id = self.client_id.as_ref().ok_or_else(|| {
+            MqttError::ProtocolError("no client id for this connection".to_string())
+        })?;
         let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
-            let client_id = self.client_id.as_ref().unwrap();
-            let _ = self
+            if let Err(e) = self
                 .storage
                 .remove_inflight_message(client_id, pubrel.packet_id, InflightDirection::Inbound)
-                .await;
+                .await
+            {
+                debug!(
+                    "failed to remove inbound inflight {}: {e}",
+                    pubrel.packet_id
+                );
+            }
             self.router.route_message(&publish, Some(client_id)).await;
             ReasonCode::Success
         } else if self.protocol_version == 5 {
@@ -228,10 +292,13 @@ impl WasmClientHandler {
     async fn finish_outbound(&self, packet_id: u16) {
         self.outbound_inflight.borrow_mut().remove(packet_id);
         if let Some(client_id) = self.client_id.as_ref() {
-            let _ = self
+            if let Err(e) = self
                 .storage
                 .remove_inflight_message(client_id, packet_id, InflightDirection::Outbound)
-                .await;
+                .await
+            {
+                debug!("failed to remove outbound inflight {packet_id}: {e}");
+            }
         }
         self.acknowledged.notify_one();
     }
@@ -240,7 +307,9 @@ impl WasmClientHandler {
     /// outbound delivery the client has received, and inbound ones wait for their PUBREL. The
     /// forwarder resends unacknowledged deliveries once the session is handed over.
     pub(super) async fn restore_inflight_messages(&mut self, writer: &SharedWriter) -> Result<()> {
-        let client_id = self.client_id.as_ref().unwrap();
+        let client_id = self.client_id.as_ref().ok_or_else(|| {
+            MqttError::ProtocolError("no client id for this connection".to_string())
+        })?;
         let mut inflights = match self.storage.get_inflight_messages(client_id).await {
             Ok(msgs) => msgs,
             Err(e) => {

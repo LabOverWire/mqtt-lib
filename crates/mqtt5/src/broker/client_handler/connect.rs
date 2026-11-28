@@ -646,24 +646,31 @@ impl ClientHandler {
         session: &mut ClientSession,
     ) -> Vec<String> {
         let mut unauthorized = Vec::new();
-        for topic_filter in session.subscriptions.keys() {
+        for key in session.subscriptions.keys() {
             let authorized = self
                 .auth_provider
-                .authorize_subscribe(&session.client_id, self.user_id.as_deref(), topic_filter)
+                .authorize_subscribe(
+                    &session.client_id,
+                    self.user_id.as_deref(),
+                    &key.topic_filter,
+                )
                 .await;
             if !authorized {
                 warn!(
                     client_id = %session.client_id,
-                    topic_filter = %topic_filter,
+                    topic_filter = %key.topic_filter,
                     "Dropping subscription on session restore: no longer authorized"
                 );
-                unauthorized.push(topic_filter.clone());
+                unauthorized.push(key.clone());
             }
         }
-        for filter in &unauthorized {
-            session.subscriptions.remove(filter);
+        for key in &unauthorized {
+            session.subscriptions.remove(key);
         }
         unauthorized
+            .into_iter()
+            .map(|key| key.topic_filter)
+            .collect()
     }
 }
 
