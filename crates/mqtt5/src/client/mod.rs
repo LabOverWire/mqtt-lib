@@ -180,10 +180,12 @@ impl MqttClient {
         async move { connected.load(std::sync::atomic::Ordering::SeqCst) }
     }
 
+    #[cfg(feature = "broker")]
     pub(crate) async fn subscription_identifiers_available(&self) -> bool {
         self.inner.read().await.subscription_identifiers_available()
     }
 
+    #[cfg(feature = "broker")]
     pub(crate) async fn forget_ack_subscriptions(&self) {
         self.inner
             .read()

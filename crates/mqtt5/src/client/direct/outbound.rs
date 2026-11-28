@@ -45,6 +45,7 @@ impl ServerCapabilities {
         }
     }
 
+    #[cfg(feature = "broker")]
     pub(crate) fn subscription_identifiers(self) -> bool {
         self.subscription_identifiers
     }

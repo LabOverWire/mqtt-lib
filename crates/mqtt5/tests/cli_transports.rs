@@ -1,43 +1,17 @@
 #![cfg(feature = "broker")]
-//! CLI transport tests
-//!
-//! Tests different transport types: TCP, TLS
-
-use std::process::Command;
 
 mod common;
-use common::TestBroker;
+use common::{find_workspace_root, get_cli_binary_path, TestBroker};
 
-fn get_cli_binary() -> &'static str {
-    if std::path::Path::new("../../target/release/mqttv5").exists() {
-        "../../target/release/mqttv5"
-    } else if std::path::Path::new("target/release/mqttv5").exists() {
-        "target/release/mqttv5"
-    } else {
-        Command::new("cargo")
-            .args(["build", "--release", "-p", "mqttv5-cli"])
-            .output()
-            .expect("Failed to build CLI");
-        "../../target/release/mqttv5"
-    }
-}
-
-fn ensure_cli_built() {
-    let _ = get_cli_binary();
-}
-
-/// Test TCP transport (mqtt://)
 #[tokio::test]
 async fn test_cli_tcp_transport() {
-    ensure_cli_built();
     let broker = TestBroker::start().await;
-    let broker_url = broker.address(); // This returns mqtt://...
 
-    let result = tokio::process::Command::new(get_cli_binary())
+    let result = tokio::process::Command::new(get_cli_binary_path())
         .args([
             "pub",
             "--url",
-            broker_url,
+            broker.address(),
             "--topic",
             "test/tcp",
             "--message",
@@ -49,31 +23,20 @@ async fn test_cli_tcp_transport() {
         .expect("Failed to run pub");
 
     assert!(result.status.success(), "TCP transport should work");
-    println!("✅ TCP transport (mqtt://) works");
 }
 
-/// Test TLS transport (mqtts://)
 #[tokio::test]
 async fn test_cli_tls_transport() {
-    ensure_cli_built();
+    let broker = TestBroker::start_with_tls().await;
+    let ca_cert = find_workspace_root().join("test_certs/ca.pem");
 
-    // Generate test certificates if not present
-    if !std::path::Path::new("../../test_certs/server.pem").exists() {
-        let _ = Command::new("../../scripts/generate_test_certs.sh").output();
-    }
-
-    let _broker = TestBroker::start_with_tls().await;
-    // TLS broker listens on a different port, but we can't get it directly
-    // Just use a known TLS port for testing
-    let tls_url = "mqtts://localhost:8883";
-
-    // Note: This will likely fail due to certificate validation
-    // but we're testing that the URL scheme is recognized
-    let result = tokio::process::Command::new(get_cli_binary())
+    let result = tokio::process::Command::new(get_cli_binary_path())
         .args([
             "pub",
             "--url",
-            tls_url,
+            broker.address(),
+            "--ca-cert",
+            ca_cert.to_str().expect("CA path is not UTF-8"),
             "--topic",
             "test/tls",
             "--message",
@@ -84,27 +47,16 @@ async fn test_cli_tls_transport() {
         .await
         .expect("Failed to run pub");
 
-    // Check that it tried to connect with TLS (even if it failed due to certs)
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    if stderr.contains("certificate") || stderr.contains("TLS") || stderr.contains("SSL") {
-        println!("✅ TLS transport (mqtts://) is recognized and attempted");
-    } else {
-        // It might succeed if certs are properly configured
-        if result.status.success() {
-            println!("✅ TLS transport (mqtts://) works");
-        } else {
-            println!("⚠️  TLS connection failed: {stderr}");
-        }
-    }
+    assert!(
+        result.status.success(),
+        "TLS transport should work: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
-/// Test URL parsing with custom ports
 #[tokio::test]
 async fn test_cli_url_custom_ports() {
-    ensure_cli_built();
-
-    // Test custom TCP port
-    let tcp_result = tokio::process::Command::new(get_cli_binary())
+    let tcp_result = tokio::process::Command::new(get_cli_binary_path())
         .args([
             "pub",
             "--url",
@@ -125,8 +77,7 @@ async fn test_cli_url_custom_ports() {
         "Should try to connect to custom port"
     );
 
-    // Test custom TLS port
-    let tls_result = tokio::process::Command::new(get_cli_binary())
+    let tls_result = tokio::process::Command::new(get_cli_binary_path())
         .args([
             "pub",
             "--url",
@@ -150,17 +101,11 @@ async fn test_cli_url_custom_ports() {
             || tls_stdout.contains("CryptoProvider"),
         "Should try to connect to custom TLS port or fail with crypto provider issue"
     );
-
-    println!("✅ Custom ports in URLs work correctly");
 }
 
-/// Test transport selection via URL scheme in help
 #[tokio::test]
 async fn test_cli_transport_help() {
-    ensure_cli_built();
-
-    // Check that help mentions all transport types
-    let pub_help = tokio::process::Command::new(get_cli_binary())
+    let pub_help = tokio::process::Command::new(get_cli_binary_path())
         .args(["pub", "--help"])
         .output()
         .await
@@ -172,6 +117,4 @@ async fn test_cli_transport_help() {
         help_text.contains("mqtt://"),
         "Should mention TCP transport"
     );
-
-    println!("✅ Transport types documented in help");
 }

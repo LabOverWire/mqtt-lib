@@ -193,7 +193,6 @@ pub struct UnifiedWriter {
     flush_wanted: AtomicU64,
     flush_queued: AtomicBool,
     background_flusher: OnceLock<tokio::sync::mpsc::UnboundedSender<Arc<UnifiedWriter>>>,
-    #[cfg(feature = "transport-quic")]
     drained: Option<Arc<tokio::sync::Notify>>,
     #[cfg(feature = "transport-quic")]
     slot: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
@@ -231,7 +230,6 @@ impl UnifiedWriter {
             flush_wanted: AtomicU64::new(0),
             flush_queued: AtomicBool::new(false),
             background_flusher: OnceLock::new(),
-            #[cfg(feature = "transport-quic")]
             drained: None,
             #[cfg(feature = "transport-quic")]
             slot: Mutex::new(None),
@@ -352,7 +350,7 @@ impl UnifiedWriter {
         self.taken.load(Ordering::Acquire) > offset
     }
 
-    #[cfg(all(test, feature = "transport-quic"))]
+    #[cfg(test)]
     pub fn commit_bytes(&self, bytes: &[u8]) -> Result<u64> {
         let mut pending = self.pending.lock();
         if pending.closed {
@@ -588,7 +586,6 @@ impl UnifiedWriter {
     }
 
     fn notify_drained(&self) {
-        #[cfg(feature = "transport-quic")]
         if let Some(drained) = &self.drained {
             drained.notify_waiters();
         }
@@ -1126,6 +1123,7 @@ mod tests {
         draining.abort();
     }
 
+    #[cfg(feature = "transport-quic")]
     #[tokio::test]
     async fn bytes_of_a_failed_write_are_never_reported_as_flushed() {
         let (writer, peer) = loopback_writer().await;

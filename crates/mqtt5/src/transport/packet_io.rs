@@ -9,10 +9,13 @@ use crate::transport::tls::{TlsReadHalf, TlsWriteHalf};
 use crate::Transport;
 use bytes::{Buf, BufMut, BytesMut};
 use std::future::Future;
+#[cfg(feature = "broker")]
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::OwnedSemaphorePermit;
+#[cfg(feature = "broker")]
+use tokio::sync::Semaphore;
 
 /// Extension trait for Transport to add packet I/O methods
 pub trait PacketIo: Transport {
@@ -300,12 +303,14 @@ pub fn encode_packet_to_buffer(packet: &Packet, buf: &mut BytesMut) -> Result<()
 
 const READ_CHUNK: usize = 4096;
 
+#[cfg(feature = "broker")]
 #[derive(Clone, Debug)]
 pub(crate) struct ReadBudget {
     permits: Arc<Semaphore>,
     limit: usize,
 }
 
+#[cfg(feature = "broker")]
 impl ReadBudget {
     #[cfg(feature = "transport-quic")]
     #[must_use]
@@ -333,12 +338,14 @@ impl ReadBudget {
 
 pub type ReadPermit = OwnedSemaphorePermit;
 
+#[cfg(feature = "broker")]
 #[derive(Debug)]
 pub(crate) struct ReadShare {
     budget: ReadBudget,
     reserved: Option<ReadPermit>,
 }
 
+#[cfg(feature = "broker")]
 impl ReadShare {
     #[cfg(feature = "transport-quic")]
     pub(crate) fn budget(&self) -> &ReadBudget {
@@ -366,6 +373,7 @@ impl ReadShare {
     }
 }
 
+#[cfg(feature = "broker")]
 pub(crate) trait ChunkReader {
     fn read_chunk(&mut self, chunk: &mut [u8]) -> impl Future<Output = Result<usize>> + Send;
 }
@@ -399,6 +407,7 @@ pub async fn read_packet_reusing_buffer<T: Transport>(
     }
 }
 
+#[cfg(feature = "broker")]
 pub(crate) async fn read_packet_within_budget<R: ChunkReader>(
     reader: &mut R,
     protocol_version: u8,
@@ -446,6 +455,7 @@ fn buffered_frame(
     Ok(Some((header_len, fixed_header)))
 }
 
+#[cfg(feature = "broker")]
 fn announced_frame_len(read_buffer: &[u8], max_packet_size: usize) -> Result<Option<usize>> {
     Ok(buffered_frame(read_buffer, max_packet_size)?
         .map(|(header_len, fixed_header)| header_len + fixed_header.remaining_length as usize))
@@ -1053,7 +1063,7 @@ mod tests {
         assert!(written.len() > 200);
     }
 
-    #[cfg(feature = "transport-quic")]
+    #[cfg(all(feature = "broker", feature = "transport-quic"))]
     #[tokio::test]
     async fn a_reservation_waits_until_earlier_ones_are_released() {
         let budget = ReadBudget::new(3 * READ_CHUNK);

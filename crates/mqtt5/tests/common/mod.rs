@@ -1,5 +1,3 @@
-//! Common test utilities and scenarios
-
 pub mod cli_helpers;
 
 use mqtt5::time::Duration;
@@ -28,12 +26,18 @@ pub fn find_workspace_root() -> PathBuf {
 
 #[allow(dead_code)]
 pub fn get_cli_binary_path() -> PathBuf {
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_mqttv5") {
-        return PathBuf::from(path);
-    }
-
-    let workspace_root = find_workspace_root();
-    workspace_root.join("target").join("release").join("mqttv5")
+    let target_dir = std::env::current_exe()
+        .ok()
+        .and_then(|test_binary| {
+            test_binary
+                .ancestors()
+                .nth(3)
+                .map(std::path::Path::to_path_buf)
+        })
+        .unwrap_or_else(|| find_workspace_root().join("target"));
+    target_dir
+        .join("release")
+        .join(format!("mqttv5{}", std::env::consts::EXE_SUFFIX))
 }
 
 #[allow(dead_code)]
@@ -102,7 +106,6 @@ impl TestBroker {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    /// Start a test broker with TLS support on a random port
     #[allow(dead_code)]
     pub async fn start_with_tls() -> Self {
         use mqtt5::broker::config::{
@@ -134,7 +137,6 @@ impl TestBroker {
             .await
             .expect("Failed to create test broker with TLS");
 
-        // Its listener is bound as it is made, on a port of its own.
         let tls_port = broker
             .tls_local_addr()
             .expect("TLS listener must be bound")
@@ -177,7 +179,6 @@ impl TestBroker {
             .await
             .expect("Failed to create test broker with WebSocket");
 
-        // Its listener is bound as it is made, on a port of its own.
         let ws_port = broker
             .ws_local_addr()
             .expect("WebSocket listener must be bound")
@@ -299,7 +300,6 @@ impl TestBroker {
         }
     }
 
-    /// Get the broker address
     #[allow(dead_code)]
     pub fn address(&self) -> &str {
         &self.address
@@ -314,8 +314,6 @@ impl Drop for TestBroker {
     }
 }
 
-/// Forwards each connection to `to`, and drops every one open when `cut` is
-/// notified, while still taking new ones
 #[allow(dead_code)]
 pub async fn cutting_proxy(to: SocketAddr) -> (SocketAddr, std::sync::Arc<tokio::sync::Notify>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -339,13 +337,11 @@ pub async fn cutting_proxy(to: SocketAddr) -> (SocketAddr, std::sync::Arc<tokio:
     (addr, cut)
 }
 
-/// The test CA, which signs the test brokers' certificates
 #[allow(dead_code)]
 pub fn test_ca() -> Vec<u8> {
     std::fs::read(find_workspace_root().join("test_certs/ca.pem")).unwrap()
 }
 
-/// A CA that signs no test broker's certificate
 #[allow(dead_code)]
 pub fn other_ca() -> Vec<u8> {
     rcgen::generate_simple_self_signed(vec!["other-ca".to_string()])
@@ -355,7 +351,6 @@ pub fn other_ca() -> Vec<u8> {
         .into_bytes()
 }
 
-/// Default timeout for test operations
 #[allow(dead_code)]
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -379,7 +374,6 @@ pub async fn create_test_client_with_broker(name: &str, broker_addr: &str) -> Mq
     client
 }
 
-/// Message collector for testing subscriptions
 #[derive(Clone)]
 pub struct MessageCollector {
     messages: Arc<Mutex<Vec<ReceivedMessage>>>,
@@ -403,7 +397,6 @@ impl MessageCollector {
         }
     }
 
-    /// Get a callback function for subscriptions
     pub fn callback(&self) -> impl Fn(mqtt5::types::Message) + Send + Sync + 'static {
         let messages = self.messages.clone();
         move |msg| {
