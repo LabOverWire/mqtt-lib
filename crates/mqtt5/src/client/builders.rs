@@ -66,6 +66,9 @@ impl MqttClient {
             monitor_wakeup: Arc::new(tokio::sync::Notify::new()),
             cancelled_connect: Arc::new(parking_lot::Mutex::new(None)),
             monitored_connect: Arc::new(parking_lot::Mutex::new(None)),
+            unsettled_restore: Arc::new(parking_lot::Mutex::new(
+                super::state::UnsettledRestore::default(),
+            )),
             tls_config: Arc::new(RwLock::new(super::StoredTlsConfig::default())),
             transport_config: Arc::new(RwLock::new(
                 crate::transport::ClientTransportConfig::default(),
