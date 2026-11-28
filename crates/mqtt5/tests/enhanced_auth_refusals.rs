@@ -604,8 +604,15 @@ async fn client_does_not_answer_continue_without_method_after_connack() {
     );
 }
 
-async fn client_answer_to_server_reauthenticate_after_connack(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handler {
+    Counting,
+    Missing,
+}
+
+async fn client_answer_to_server_auth_after_connack(
     auth: &'static [u8],
+    handler: Handler,
 ) -> Option<Packet> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -632,11 +639,13 @@ async fn client_answer_to_server_reauthenticate_after_connack(
         ConnectOptions::new("server-reauthenticate-after-connack")
             .with_authentication_method(METHOD),
     );
-    client
-        .set_auth_handler(CountingAuthHandler {
-            challenges: Arc::clone(&challenges),
-        })
-        .await;
+    if handler == Handler::Counting {
+        client
+            .set_auth_handler(CountingAuthHandler {
+                challenges: Arc::clone(&challenges),
+            })
+            .await;
+    }
     tokio::time::timeout(
         Duration::from_secs(10),
         client.connect(&format!("mqtt://{addr}")),
@@ -653,8 +662,9 @@ async fn client_answer_to_server_reauthenticate_after_connack(
     answer
 }
 
-async fn connect_after_server_reauthenticate_before_connack(
+async fn connect_after_server_auth_before_connack(
     auth: &'static [u8],
+    handler: Handler,
 ) -> mqtt5::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -676,11 +686,13 @@ async fn connect_after_server_reauthenticate_before_connack(
         ConnectOptions::new("server-reauthenticate-before-connack")
             .with_authentication_method(METHOD),
     );
-    client
-        .set_auth_handler(CountingAuthHandler {
-            challenges: Arc::clone(&challenges),
-        })
-        .await;
+    if handler == Handler::Counting {
+        client
+            .set_auth_handler(CountingAuthHandler {
+                challenges: Arc::clone(&challenges),
+            })
+            .await;
+    }
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         client.connect(&format!("mqtt://{addr}")),
@@ -701,7 +713,7 @@ fn assert_protocol_error_disconnect(answer: Option<Packet>) {
         Some(Packet::Disconnect(disconnect)) => assert_eq!(
             disconnect.reason_code,
             ReasonCode::ProtocolError,
-            "a server AUTH with reason code 0x19 must get DISCONNECT 0x82"
+            "the client must answer with DISCONNECT 0x82"
         ),
         other => panic!("expected DISCONNECT, got {other:?}"),
     }
@@ -709,19 +721,22 @@ fn assert_protocol_error_disconnect(answer: Option<Packet>) {
 
 #[tokio::test]
 async fn the_client_answers_a_server_reauthenticate_without_a_method_with_protocol_error() {
-    let answer = client_answer_to_server_reauthenticate_after_connack(&REAUTH_WITHOUT_METHOD).await;
+    let answer =
+        client_answer_to_server_auth_after_connack(&REAUTH_WITHOUT_METHOD, Handler::Counting).await;
     assert_protocol_error_disconnect(answer);
 }
 
 #[tokio::test]
 async fn the_client_answers_a_server_reauthenticate_with_a_method_with_protocol_error() {
-    let answer = client_answer_to_server_reauthenticate_after_connack(&REAUTH_WITH_METHOD).await;
+    let answer =
+        client_answer_to_server_auth_after_connack(&REAUTH_WITH_METHOD, Handler::Counting).await;
     assert_protocol_error_disconnect(answer);
 }
 
 #[tokio::test]
 async fn connect_fails_with_protocol_error_on_a_server_reauthenticate_without_a_method() {
-    let result = connect_after_server_reauthenticate_before_connack(&REAUTH_WITHOUT_METHOD).await;
+    let result =
+        connect_after_server_auth_before_connack(&REAUTH_WITHOUT_METHOD, Handler::Counting).await;
     assert!(
         matches!(result, Err(MqttError::ProtocolError(_))),
         "connect returned {result:?}"
@@ -730,7 +745,27 @@ async fn connect_fails_with_protocol_error_on_a_server_reauthenticate_without_a_
 
 #[tokio::test]
 async fn connect_fails_with_protocol_error_on_a_server_reauthenticate_with_a_method() {
-    let result = connect_after_server_reauthenticate_before_connack(&REAUTH_WITH_METHOD).await;
+    let result =
+        connect_after_server_auth_before_connack(&REAUTH_WITH_METHOD, Handler::Counting).await;
+    assert!(
+        matches!(result, Err(MqttError::ProtocolError(_))),
+        "connect returned {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_client_without_an_auth_handler_answers_continue_without_a_method_with_protocol_error() {
+    let answer =
+        client_answer_to_server_auth_after_connack(&CONTINUE_AUTH_WITHOUT_METHOD, Handler::Missing)
+            .await;
+    assert_protocol_error_disconnect(answer);
+}
+
+#[tokio::test]
+async fn connect_without_an_auth_handler_fails_with_protocol_error_on_continue_without_a_method() {
+    let result =
+        connect_after_server_auth_before_connack(&CONTINUE_AUTH_WITHOUT_METHOD, Handler::Missing)
+            .await;
     assert!(
         matches!(result, Err(MqttError::ProtocolError(_))),
         "connect returned {result:?}"
