@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The broker says why before it closes a connection over an AUTH 0x18 or 0x19 without an authentication method** (#369). Omitting the Authentication Method from an AUTH is a Protocol Error (section 3.15.2.2.2), but decoding an `AuthPacket` (in mqtt5-protocol) failed on such a packet, so the broker closed the connection with nothing sent. The decoder now accepts it and the receiver checks the method: after CONNACK the broker sends DISCONNECT 0x82 (Protocol Error), and before CONNACK it sends CONNACK 0x82, since no DISCONNECT may be sent there (MQTT-3.14.0-1). The `mqtt5` client still refuses an AUTH 0x18 without a method from the server with a protocol error and does not answer it. It now also treats a server AUTH with reason code 0x19 (Re-authenticate), which only a client may send, as a protocol error: DISCONNECT 0x82 after CONNACK, and `connect` fails with `ProtocolError` before it. For one that carried a method it sent 0x87 and failed with `AuthenticationFailed`. `AuthPacket::validate` and encoding are unchanged.
+
 ## [mqtt5 0.53.0] - 2026-11-28
 
 ### Breaking
