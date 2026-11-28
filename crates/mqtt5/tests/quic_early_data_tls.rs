@@ -77,13 +77,19 @@ async fn quics_takes_a_new_stored_tls_config() {
     let (broker, addr) = start_quic_broker().await;
     let client = MqttClient::new("early-data-new-stored");
     client.set_quic_early_data(true).await;
-    client.set_tls_config(None, None, Some(test_ca())).await;
+    client
+        .set_tls_config(None, None, Some(test_ca()))
+        .await
+        .unwrap();
     client
         .connect(&format!("quics://{addr}"))
         .await
         .expect("trusted by the stored configuration's CA");
     client.disconnect().await.unwrap();
-    client.set_tls_config(None, None, Some(other_ca())).await;
+    client
+        .set_tls_config(None, None, Some(other_ca()))
+        .await
+        .unwrap();
     client
         .connect(&format!("quics://{addr}"))
         .await
@@ -96,7 +102,10 @@ async fn early_data_is_used_again_with_the_same_settings() {
     let (broker, addr) = start_quic_broker().await;
     let client = MqttClient::new("early-data-kept");
     client.set_quic_early_data(true).await;
-    client.set_tls_config(None, None, Some(test_ca())).await;
+    client
+        .set_tls_config(None, None, Some(test_ca()))
+        .await
+        .unwrap();
     client
         .connect(&format!("quics://{addr}"))
         .await
@@ -189,7 +198,10 @@ async fn client_that_kept_a_configuration(id: &str) -> (MqttClient, tokio::task:
     client
         .set_quic_connect_timeout(std::time::Duration::from_secs(1))
         .await;
-    client.set_tls_config(None, None, Some(test_ca())).await;
+    client
+        .set_tls_config(None, None, Some(test_ca()))
+        .await
+        .unwrap();
     client
         .connect(&format!("quics://{addr}"))
         .await
