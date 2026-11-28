@@ -413,6 +413,6 @@ AuthConfig {
 }
 ```
 
-Successful authentication clears the attempt counter for that IP/username. An entry is removed once its window, or its lockout if it reached the limit, has passed; the tables are swept at most once per window.
+A successful CONNECT clears the attempt counter for its username; the counter for an address is not cleared by a success and expires with its window. An entry is removed once its window, or its lockout if it reached the limit, has passed; the tables are swept at most once per window.
 
 The limit applies to the provider the broker finally uses, whether built from `AuthConfig` or installed with `MqttBroker::with_auth_provider`. `MqttBroker::auth_provider()` returns the provider without the limiter, so a `CompositeAuthProvider` built around it and installed again is limited once; do not wrap an installed provider in `RateLimitedAuthProvider` as well. Enhanced authentication and re-authentication count failures by IP address only, since the username is not part of those exchanges. A client over the limit is refused with reason code 0x9F (Connection rate exceeded), in CONNACK or, during re-authentication, in DISCONNECT.
