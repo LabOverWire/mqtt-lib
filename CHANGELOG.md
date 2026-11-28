@@ -7,17 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **TLS no longer panics in a program that also enables rustls's default features** (#298). `mqtt5` enables rustls's `ring` feature, and a crate that depends on rustls with its default features adds `aws-lc-rs`, so rustls could not choose a process-level `CryptoProvider` and `connect` to an mqtts:// or wss:// address, a broker with a TLS, WebSocket TLS or mutual TLS QUIC listener, and a JWKS fetch panicked unless the program called `CryptoProvider::install_default()` first. Every rustls configuration the crate builds now names its provider. The TLS and WebSocket clients, the TLS acceptor and the JWKS fetch use the process-level `CryptoProvider` when a program has installed one, otherwise ring. The QUIC client and the QUIC acceptor use ring. No process-level provider is needed. A wss:// connection without a TLS configuration now builds its client configuration in the crate, from the platform's root certificates as tokio-tungstenite did.
+
+## [mqtt5 0.53.0] - 2026-11-28
+
 ### Breaking
 
 - **`ClientSession::subscriptions` is keyed by `SubscriptionKey`** (see Fixed), a filter and an optional QUIC flow id, instead of the filter alone. `ClientSession::remove_subscription`, `ClientSession::subscription_instance` and `SessionManager::remove_subscription` take the flow id; `SessionManager::update_subscriptions` and `SessionManager::get_subscriptions` use the new key; `ClientSession::subscription` looks up one subscription and `ClientSession::remove_flow_subscriptions` removes a flow's subscriptions. `ClientSession::follow_removed_subscription` and `MessageRouter::held_flow` are removed. `MessageRouter::has_flow_subscription` checks for a subscription on one flow.
 
 ### Fixed
 
-- **The wasm broker resolves inbound Topic Aliases** (#249). It advertised a Topic Alias Maximum but routed an aliased PUBLISH as received: the alias reached subscribers, and a PUBLISH with an empty topic went out with no topic, so a subscriber read it on whichever topic it last saw for that alias. Each connection now accepts aliases up to the maximum it was given in CONNACK (MQTT-3.3.2-12), maps an alias to its topic, resolves an empty topic from the alias, checks authorization and routes on that topic, and removes the Topic Alias before delivery (MQTT-3.3.2-11), as on the native broker. Alias 0, an alias above the advertised maximum, or an unknown alias with an empty topic gets DISCONNECT with Topic Alias Invalid, and an empty topic without an alias gets DISCONNECT with Protocol Error.
 - **The `mqtt5` client subscribes again on a resumed session when its last resubscribe was cut off** (#353). After a connection without a session, the client sends its stored subscriptions again. When that connection closed before their SUBACKs, the next connection that the server answered with Session Present 1 restored only the local callbacks, so the server never held the subscriptions and nothing was delivered for them. The same happened after `connect_with_options` with another client identifier. The client now remembers that a resubscribe has not settled, and the next connection sends the stored subscriptions, deferred-ack ones included, whatever its Session Present says. A resubscribe stays unsettled while the connection cut one of its SUBSCRIBEs off, before it was sent or before its SUBACK arrived; one the server refuses, or one the client does not send because a local check refuses it, settles.
 - **A refused subscribe to a filter keeps the callback of an accepted subscription to it** (#365). A test now covers it: a second `subscribe` to a filter that the server refuses leaves the first callback in place, and it receives the filter's messages after a reconnect. The fix shipped with the change that made a failed or cancelled subscribe remove only its own callback in mqtt5 0.51.0 (see `MqttError::OutcomeUnknown` there).
 - **A subscription to one filter on two QUIC flows counts against the subscription quota and is stored for each flow** (#272). The broker keeps a subscription per filter, ShareName and flow, but the `max_subscriptions_per_client` check treated a SUBSCRIBE to a filter already subscribed on another flow as an update and granted it past the limit, and the stored session kept one subscription per filter, so a resumed session restored the filter on only one of its flows. The quota now counts a new flow's subscription and the stored session keeps one per filter and flow. Sessions stored before keep loading as they did; a flow's subscription is stored under its filter followed by a NUL character and the flow id. Versions from 0.49.0 drop such a subscription at recovery, as they do every flow-bound subscription; an older version restores it as a filter that contains a NUL, which matches no topic.
-- **TLS no longer panics in a program that also enables rustls's default features** (#298). `mqtt5` enables rustls's `ring` feature, and a crate that depends on rustls with its default features adds `aws-lc-rs`, so rustls could not choose a process-level `CryptoProvider` and `connect` to an mqtts:// or wss:// address, a broker with a TLS, WebSocket TLS or mutual TLS QUIC listener, and a JWKS fetch panicked unless the program called `CryptoProvider::install_default()` first. Every rustls configuration the crate builds now names its provider. The TLS and WebSocket clients, the TLS acceptor and the JWKS fetch use the process-level `CryptoProvider` when a program has installed one, otherwise ring. The QUIC client and the QUIC acceptor use ring. No process-level provider is needed. A wss:// connection without a TLS configuration now builds its client configuration in the crate, from the platform's root certificates as tokio-tungstenite did.
+- **A client that connects again with the same client id keeps its message rate and bandwidth limits.** The broker kept a client's limit counters in one entry per client id, and the connection that was replaced removed that entry when it closed, so the new connection was not limited; a new connection also reset the counters. The entry now stays until the last connection with that client id has closed.
+
+## [mqttv5-cli 0.29.15] - 2026-11-28
+
+### Changed
+
+- Requires mqtt5 0.53. See mqtt5 0.53.0.
+
+## [mqtt5-wasm 2.1.13] - 2026-11-28
+
+### Fixed
+
+- **The wasm broker resolves inbound Topic Aliases** (#249). It advertised a Topic Alias Maximum but routed an aliased PUBLISH as received: the alias reached subscribers, and a PUBLISH with an empty topic went out with no topic, so a subscriber read it on whichever topic it last saw for that alias. Each connection now accepts aliases up to the maximum it was given in CONNACK (MQTT-3.3.2-12), maps an alias to its topic, resolves an empty topic from the alias, checks authorization and routes on that topic, and removes the Topic Alias before delivery (MQTT-3.3.2-11), as on the native broker. Alias 0, an alias above the advertised maximum, or an unknown alias with an empty topic gets DISCONNECT with Topic Alias Invalid, and an empty topic without an alias gets DISCONNECT with Protocol Error.
+
+### Changed
+
+- Requires mqtt5 0.53. See mqtt5 0.53.0.
 
 ## [mqtt5 0.52.0] - 2026-11-27
 
