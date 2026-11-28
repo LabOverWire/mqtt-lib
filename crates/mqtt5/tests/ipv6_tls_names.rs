@@ -55,7 +55,8 @@ async fn mqtts_to_an_ipv6_address_verifies_the_certificate_against_it() {
             None,
             Some(std::fs::read(certs().join("ca.pem")).unwrap()),
         )
-        .await;
+        .await
+        .unwrap();
     client
         .connect_with_options(
             &format!("mqtts://[::1]:{}", tls.port()),

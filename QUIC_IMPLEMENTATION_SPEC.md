@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Or with custom TLS certificates loaded from PEM bytes
     let ca_pem = std::fs::read("ca.crt")?;
-    client.set_tls_config(None, None, Some(ca_pem)).await;
+    client.set_tls_config(None, None, Some(ca_pem)).await?;
     client.connect("quics://broker.example.com:14567").await?;
 
     Ok(())
