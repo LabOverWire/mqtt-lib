@@ -59,7 +59,7 @@ fn other_ca() -> Vec<u8> {
 async fn connect_to_localhost(port: u16, ca: Vec<u8>) -> (mqtt5::error::Result<()>, Duration) {
     let id = format!("quic-cert-refusal-{}", std::process::id());
     let client = MqttClient::new(&id);
-    client.set_tls_config(None, None, Some(ca)).await;
+    client.set_tls_config(None, None, Some(ca)).await.unwrap();
     let started = Instant::now();
     let outcome = tokio::time::timeout(
         Duration::from_secs(20),

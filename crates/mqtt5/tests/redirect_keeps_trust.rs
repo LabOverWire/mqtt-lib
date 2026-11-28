@@ -116,7 +116,10 @@ fn no_verification() -> WebSocketConfig {
 
 async fn connect_with_unverifying_websocket_config(url: &str, id: &str) -> Result<(), String> {
     let client = MqttClient::new(id);
-    client.set_tls_config(None, None, Some(trusted_ca())).await;
+    client
+        .set_tls_config(None, None, Some(trusted_ca()))
+        .await
+        .unwrap();
     tokio::time::timeout(
         Duration::from_secs(5),
         client.connect_with_options(
