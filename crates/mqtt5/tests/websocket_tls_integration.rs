@@ -190,7 +190,8 @@ async fn mqtt_client_presents_its_stored_tls_config_over_wss() {
             Some(std::fs::read(CLIENT_KEY).expect("read client key")),
             Some(std::fs::read(CA).expect("read CA")),
         )
-        .await;
+        .await
+        .unwrap();
 
     // The test server stops after the WebSocket handshake and never answers
     // CONNECT, so only the TLS handshake it observed is checked.

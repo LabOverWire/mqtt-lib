@@ -102,7 +102,8 @@ async fn connect(
     } else {
         client
             .set_tls_config(None, None, Some(certificate.pem.clone()))
-            .await;
+            .await
+            .unwrap();
     }
     let result = tokio::time::timeout(
         Duration::from_secs(10),
@@ -306,7 +307,8 @@ async fn mqtts_to_a_link_local_address_sends_no_server_name() {
     let client = MqttClient::new("ipv6-connect");
     client
         .set_tls_config(None, None, Some(Certificate::for_names(&["fe80::1"]).pem))
-        .await;
+        .await
+        .unwrap();
     let _ = tokio::time::timeout(
         Duration::from_secs(2),
         client.connect_with_options(
