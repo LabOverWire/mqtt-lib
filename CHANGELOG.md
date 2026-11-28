@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
+- **`ClientSession::subscriptions` is keyed by `SubscriptionKey`** (see Fixed), a filter and an optional QUIC flow id, instead of the filter alone. `ClientSession::remove_subscription`, `ClientSession::subscription_instance` and `SessionManager::remove_subscription` take the flow id; `SessionManager::update_subscriptions` and `SessionManager::get_subscriptions` use the new key; `ClientSession::subscription` looks up one subscription and `ClientSession::remove_flow_subscriptions` removes a flow's subscriptions. `ClientSession::follow_removed_subscription` and `MessageRouter::held_flow` are removed. `MessageRouter::has_flow_subscription` checks for a subscription on one flow.
 - **A provider installed with `MqttBroker::with_auth_provider` is rate limited** (see Fixed, #281). `auth_config.rate_limit` is enabled by default, so a broker with a custom provider now refuses an address or username with CONNACK 0x9F after `max_attempts` failures (5 in 60 s, locked for 300 s by default), as one built from configuration already did. `MqttBroker::auth_provider()` returns the provider without the limiter. An application that wrapped its provider in `RateLimitedAuthProvider` itself should stop doing so, or set `rate_limit.enabled` to false, or failures are counted twice.
 
 ### Added
@@ -18,10 +18,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The wasm broker resolves inbound Topic Aliases** (#249). It advertised a Topic Alias Maximum but routed an aliased PUBLISH as received: the alias reached subscribers, and a PUBLISH with an empty topic went out with no topic, so a subscriber read it on whichever topic it last saw for that alias. Each connection now accepts aliases up to the maximum it was given in CONNACK (MQTT-3.3.2-12), maps an alias to its topic, resolves an empty topic from the alias, checks authorization and routes on that topic, and removes the Topic Alias before delivery (MQTT-3.3.2-11), as on the native broker. Alias 0, an alias above the advertised maximum, or an unknown alias with an empty topic gets DISCONNECT with Topic Alias Invalid, and an empty topic without an alias gets DISCONNECT with Protocol Error.
+- **The `mqtt5` client subscribes again on a resumed session when its last resubscribe was cut off** (#353). After a connection without a session, the client sends its stored subscriptions again. When that connection closed before their SUBACKs, the next connection that the server answered with Session Present 1 restored only the local callbacks, so the server never held the subscriptions and nothing was delivered for them. The same happened after `connect_with_options` with another client identifier. The client now remembers that a resubscribe has not settled, and the next connection sends the stored subscriptions, deferred-ack ones included, whatever its Session Present says. A resubscribe stays unsettled while the connection cut one of its SUBSCRIBEs off, before it was sent or before its SUBACK arrived; one the server refuses, or one the client does not send because a local check refuses it, settles.
+- **A refused subscribe to a filter keeps the callback of an accepted subscription to it** (#365). A test now covers it: a second `subscribe` to a filter that the server refuses leaves the first callback in place, and it receives the filter's messages after a reconnect. The fix shipped with the change that made a failed or cancelled subscribe remove only its own callback in mqtt5 0.51.0 (see `MqttError::OutcomeUnknown` there).
+- **A subscription to one filter on two QUIC flows counts against the subscription quota and is stored for each flow** (#272). The broker keeps a subscription per filter, ShareName and flow, but the `max_subscriptions_per_client` check treated a SUBSCRIBE to a filter already subscribed on another flow as an update and granted it past the limit, and the stored session kept one subscription per filter, so a resumed session restored the filter on only one of its flows. The quota now counts a new flow's subscription and the stored session keeps one per filter and flow. Sessions stored before keep loading as they did; a flow's subscription is stored under its filter followed by a NUL character and the flow id. Versions from 0.49.0 drop such a subscription at recovery, as they do every flow-bound subscription; an older version restores it as a filter that contains a NUL, which matches no topic.
+- **The broker's authentication rate limit applies to the provider it finally uses, to enhanced authentication and to re-authentication, and its tables no longer grow without bound** (#281). The limiter wrapped only the provider built from `auth_config`, so a provider installed with `MqttBroker::with_auth_provider`, including a `CompositeAuthProvider` built around `MqttBroker::auth_provider()`, was not limited, and an application that wrapped its primary provider itself counted every fallback login as a failure. The broker now applies `auth_config.rate_limit` to whatever provider is installed last, and `MqttBroker::auth_provider()` returns that provider without the limiter, so wrapping it and installing the result is limited once. Enhanced authentication and re-authentication passed through the limiter unchecked: their failures are now counted by client address, and an address over the limit gets CONNACK or DISCONNECT 0x9F (Connection rate exceeded) without the provider being asked. `AuthRateLimiter` removed an entry only when the same address or username was checked again, so each distinct address or username that failed stayed in memory for good; entries are now removed once their window, or their lockout if they reached the limit, has passed, swept at most once per window. `AuthRateLimiter::cleanup_expired` keeps an entry that is still counting toward the limit inside its window instead of dropping it once the lockout time has passed.
+
+## [mqtt5 0.52.0] - 2026-11-27
+
+### Breaking
+
+- **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
+
+### Fixed
+
+- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
+
+## [mqttv5-cli 0.29.14] - 2026-11-27
+
+### Fixed
+
+- **`mqttv5 pub`, `sub` and `bench` fail when `--ca-cert`, `--cert` or `--key` does not load, and `bench --mode connections` fails before it starts its workers** (see mqtt5 0.52.0).
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
+
+## [mqtt5-wasm 2.1.12] - 2026-11-27
+
+### Fixed
+
 - **The wasm broker answers an AUTH with another authentication method after CONNACK with DISCONNECT Protocol Error** (#358). It sent DISCONNECT with Bad Authentication Method, which is not a DISCONNECT reason code (MQTT-3.14.2-1). During the authentication that a CONNECT starts, such an AUTH still gets a CONNACK with Bad Authentication Method. On an MQTT 3.1.1 connection, which has no DISCONNECT from the server, an AUTH now closes the connection with nothing sent.
 - **A wasm broker re-authentication can be started again before it completes** (#358). An AUTH with Re-authenticate sent during an unfinished re-authentication got DISCONNECT with Protocol Error. It now starts a new exchange, since a client may start a re-authentication at any time after CONNACK (MQTT-4.12.1-1), as on the native broker.
-- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
-- **The broker's authentication rate limit applies to the provider it finally uses, to enhanced authentication and to re-authentication, and its tables no longer grow without bound** (#281). The limiter wrapped only the provider built from `auth_config`, so a provider installed with `MqttBroker::with_auth_provider`, including a `CompositeAuthProvider` built around `MqttBroker::auth_provider()`, was not limited, and an application that wrapped its primary provider itself counted every fallback login as a failure. The broker now applies `auth_config.rate_limit` to whatever provider is installed last, and `MqttBroker::auth_provider()` returns that provider without the limiter, so wrapping it and installing the result is limited once. Enhanced authentication and re-authentication passed through the limiter unchecked: their failures are now counted by client address, and an address over the limit gets CONNACK or DISCONNECT 0x9F (Connection rate exceeded) without the provider being asked. `AuthRateLimiter` removed an entry only when the same address or username was checked again, so each distinct address or username that failed stayed in memory for good; entries are now removed once their window, or their lockout if they reached the limit, has passed, swept at most once per window. `AuthRateLimiter::cleanup_expired` keeps an entry that is still counting toward the limit inside its window instead of dropping it once the lockout time has passed.
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
 
 ## [mqtt5 0.51.1] - 2026-11-26
 

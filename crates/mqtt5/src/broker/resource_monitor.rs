@@ -55,6 +55,7 @@ struct ClientResources {
     message_count: AtomicU64,
     bytes_transferred: AtomicU64,
     window_start: Instant,
+    connections: usize,
 }
 
 impl ClientResources {
@@ -63,6 +64,7 @@ impl ClientResources {
             message_count: AtomicU64::new(0),
             bytes_transferred: AtomicU64::new(0),
             window_start: Instant::now(),
+            connections: 1,
         }
     }
 
@@ -206,7 +208,10 @@ impl ResourceMonitor {
         drop(ip_connections);
 
         let mut client_resources = self.client_resources.write().await;
-        client_resources.insert(client_id, ClientResources::new());
+        client_resources
+            .entry(client_id)
+            .and_modify(|resources| resources.connections += 1)
+            .or_insert_with(ClientResources::new);
     }
 
     /// Unregister a connection
@@ -231,9 +236,13 @@ impl ResourceMonitor {
         }
         drop(ip_connections);
 
-        // Remove client resource tracking
         let mut client_resources = self.client_resources.write().await;
-        client_resources.remove(client_id);
+        if let Some(resources) = client_resources.get_mut(client_id) {
+            resources.connections = resources.connections.saturating_sub(1);
+            if resources.connections == 0 {
+                client_resources.remove(client_id);
+            }
+        }
     }
 
     pub async fn can_send_message(&self, client_id: &str, message_size: usize) -> bool {
@@ -441,6 +450,28 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1100)).await;
         monitor.cleanup_expired_windows().await;
         assert!(monitor.can_send_message("client1", 100).await);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_connection_leaving_does_not_free_its_successor() {
+        let limits = ResourceLimits {
+            max_message_rate_per_client: 1,
+            rate_limit_window: Duration::from_secs(60),
+            ..Default::default()
+        };
+        let monitor = ResourceMonitor::new(limits);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        monitor.register_connection("client1", ip).await;
+        assert!(monitor.can_send_message("client1", 1).await);
+        monitor.register_connection("client1", ip).await;
+        monitor.unregister_connection("client1", ip).await;
+
+        assert!(!monitor.can_send_message("client1", 1).await);
+
+        monitor.unregister_connection("client1", ip).await;
+        assert!(monitor.can_send_message("client1", 1).await);
+        assert!(monitor.can_send_message("client1", 1).await);
     }
 
     #[tokio::test]
