@@ -370,7 +370,8 @@ async fn connect_with_tls_follows_a_redirect_with_its_configuration() {
     // the reconnection, redirected again, still trusts the CA it was given.
     client
         .set_tls_config(None, None, Some(common::other_ca()))
-        .await;
+        .await
+        .unwrap();
     cut.notify_waiters();
     tokio::time::timeout(Duration::from_secs(10), async {
         while connections.load(Ordering::SeqCst) < 2 {
