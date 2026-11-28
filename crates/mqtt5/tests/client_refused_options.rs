@@ -146,7 +146,8 @@ async fn enhanced_auth_over_connect_with_options_control() {
             None,
             Some(std::fs::read(certs().join("ca.pem")).unwrap()),
         )
-        .await;
+        .await
+        .unwrap();
     client.set_auth_handler(Answer).await;
     let outcome = client
         .connect_with_options(
