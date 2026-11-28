@@ -3447,7 +3447,7 @@ mod tests {
         assert_eq!(
             delivered,
             vec![("alias/a".to_string(), None)],
-            "[MQTT-3.3.2-12] the publisher's Topic Alias must not reach the subscriber"
+            "[MQTT-3.3.2-11] the publisher's Topic Alias must not reach the subscriber"
         );
     }
 

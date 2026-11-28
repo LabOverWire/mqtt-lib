@@ -24,7 +24,7 @@ impl WasmClientHandler {
     ) -> Result<()> {
         self.resolve_topic_alias(&mut publish, writer)?;
         let client_id = self.client_id.as_ref().ok_or_else(|| {
-            MqttError::ProtocolError("packet received before CONNECT".to_string())
+            MqttError::ProtocolError("no client id for this connection".to_string())
         })?;
         self.stats.publish_received(publish.payload.len());
 
@@ -250,7 +250,7 @@ impl WasmClientHandler {
         writer: &SharedWriter,
     ) -> Result<()> {
         let client_id = self.client_id.as_ref().ok_or_else(|| {
-            MqttError::ProtocolError("packet received before CONNECT".to_string())
+            MqttError::ProtocolError("no client id for this connection".to_string())
         })?;
         let reason_code = if let Some(publish) = self.inflight_publishes.remove(&pubrel.packet_id) {
             if let Err(e) = self
@@ -300,7 +300,7 @@ impl WasmClientHandler {
     /// forwarder resends unacknowledged deliveries once the session is handed over.
     pub(super) async fn restore_inflight_messages(&mut self, writer: &SharedWriter) -> Result<()> {
         let client_id = self.client_id.as_ref().ok_or_else(|| {
-            MqttError::ProtocolError("packet received before CONNECT".to_string())
+            MqttError::ProtocolError("no client id for this connection".to_string())
         })?;
         let mut inflights = match self.storage.get_inflight_messages(client_id).await {
             Ok(msgs) => msgs,
