@@ -1292,7 +1292,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.51.1"
+version = "0.52.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-wasm"
-version = "2.1.11"
+version = "2.1.12"
 dependencies = [
  "bytes",
  "console_error_panic_hook",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "mqttv5-cli"
-version = "0.29.13"
+version = "0.29.14"
 dependencies = [
  "anyhow",
  "argon2",
