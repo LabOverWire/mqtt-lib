@@ -145,6 +145,7 @@ pub struct MqttBroker {
     config: Arc<BrokerConfig>,
     router: Arc<MessageRouter>,
     auth_provider: Arc<dyn AuthProvider>,
+    auth_rate_limiter: Option<Arc<AuthRateLimiter>>,
     storage: Option<Arc<DynamicStorage>>,
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
@@ -342,38 +343,43 @@ async fn create_auth_provider(
 ) -> Result<Arc<dyn AuthProvider>> {
     use crate::broker::config::AuthMethod;
 
-    let rate_limiter = if config.rate_limit.enabled {
-        Some(Arc::new(AuthRateLimiter::new(
-            config.rate_limit.max_attempts,
-            config.rate_limit.window_secs,
-            config.rate_limit.lockout_secs,
-        )))
-    } else {
-        None
-    };
-
-    let provider = match config.auth_method {
-        AuthMethod::ScramSha256 => with_acl(create_scram_provider(config)?, config).await?,
-        AuthMethod::Jwt => with_acl(create_jwt_provider(config)?, config).await?,
-        AuthMethod::JwtFederated => create_federated_jwt_provider(config).await?,
+    match config.auth_method {
+        AuthMethod::ScramSha256 => with_acl(create_scram_provider(config)?, config).await,
+        AuthMethod::Jwt => with_acl(create_jwt_provider(config)?, config).await,
+        AuthMethod::JwtFederated => create_federated_jwt_provider(config).await,
         AuthMethod::Password | AuthMethod::None => {
-            create_password_or_anonymous_provider(config).await?
+            create_password_or_anonymous_provider(config).await
         }
-    };
+    }
+}
 
-    if let Some(rate_limiter) = rate_limiter {
-        info!(
-            max_attempts = config.rate_limit.max_attempts,
-            window_secs = config.rate_limit.window_secs,
-            lockout_secs = config.rate_limit.lockout_secs,
-            "Authentication rate limiting enabled"
-        );
-        Ok(Arc::new(RateLimitedAuthProvider::new(
-            provider,
-            rate_limiter,
-        )))
-    } else {
-        Ok(provider)
+fn create_rate_limiter(config: &crate::broker::config::AuthConfig) -> Option<Arc<AuthRateLimiter>> {
+    if !config.rate_limit.enabled {
+        return None;
+    }
+    info!(
+        max_attempts = config.rate_limit.max_attempts,
+        window_secs = config.rate_limit.window_secs,
+        lockout_secs = config.rate_limit.lockout_secs,
+        "Authentication rate limiting enabled"
+    );
+    Some(Arc::new(AuthRateLimiter::new(
+        config.rate_limit.max_attempts,
+        config.rate_limit.window_secs,
+        config.rate_limit.lockout_secs,
+    )))
+}
+
+fn rate_limited(
+    provider: &Arc<dyn AuthProvider>,
+    rate_limiter: Option<&Arc<AuthRateLimiter>>,
+) -> Arc<dyn AuthProvider> {
+    match rate_limiter {
+        Some(rate_limiter) => Arc::new(RateLimitedAuthProvider::new(
+            Arc::clone(provider),
+            Arc::clone(rate_limiter),
+        )),
+        None => Arc::clone(provider),
     }
 }
 
@@ -441,6 +447,7 @@ impl MqttBroker {
         let router = Self::build_router(&config, storage.as_ref());
 
         let auth_provider = create_auth_provider(&config.auth_config).await?;
+        let auth_rate_limiter = create_rate_limiter(&config.auth_config);
         let stats = Arc::new(BrokerStats::new());
         let resource_monitor =
             Arc::new(ResourceMonitor::new(Self::default_resource_limits(&config)));
@@ -454,12 +461,14 @@ impl MqttBroker {
 
         let config = Arc::new(config);
         let (config_watch_tx, config_watch_rx) = watch::channel(Arc::clone(&config));
-        let (auth_watch_tx, auth_watch_rx) = watch::channel(Arc::clone(&auth_provider));
+        let (auth_watch_tx, auth_watch_rx) =
+            watch::channel(rate_limited(&auth_provider, auth_rate_limiter.as_ref()));
 
         let broker = Self {
             config,
             router,
             auth_provider,
+            auth_rate_limiter,
             storage,
             stats,
             resource_monitor,
@@ -982,7 +991,9 @@ impl MqttBroker {
 
     #[must_use]
     pub fn with_auth_provider(mut self, provider: Arc<dyn AuthProvider>) -> Self {
-        let _ = self.auth_watch_tx.send(Arc::clone(&provider));
+        let _ = self
+            .auth_watch_tx
+            .send(rate_limited(&provider, self.auth_rate_limiter.as_ref()));
         self.auth_provider = provider;
         self
     }
@@ -1811,7 +1822,9 @@ impl MqttBroker {
 
                 match create_auth_provider(&new_config.auth_config).await {
                     Ok(new_auth) => {
-                        let _ = auth_watch_tx.send(new_auth);
+                        let new_rate_limiter = create_rate_limiter(&new_config.auth_config);
+                        let _ =
+                            auth_watch_tx.send(rate_limited(&new_auth, new_rate_limiter.as_ref()));
                         info!("Auth provider recreated from reloaded config");
 
                         let echo_key = if new_config.echo_suppression_config.enabled {

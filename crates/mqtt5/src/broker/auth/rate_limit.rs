@@ -12,7 +12,9 @@ use tracing::warn;
 
 use crate::packet::connect::ConnectPacket;
 
-use super::{AuthProvider, AuthResult, EnhancedAuthResult, ReasonCode};
+use super::{AuthProvider, AuthResult, EnhancedAuthResult, EnhancedAuthStatus, ReasonCode};
+
+type EnhancedAuthFuture<'a> = Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>>;
 
 #[derive(Debug, Clone)]
 struct RateLimitEntry {
@@ -23,6 +25,7 @@ struct RateLimitEntry {
 pub struct AuthRateLimiter {
     ip_entries: Arc<Mutex<HashMap<IpAddr, RateLimitEntry>>>,
     username_entries: Arc<Mutex<HashMap<String, RateLimitEntry>>>,
+    last_prune: Mutex<Instant>,
     max_attempts: u32,
     window_duration: Duration,
     lockout_duration: Duration,
@@ -34,6 +37,7 @@ impl AuthRateLimiter {
         Self {
             ip_entries: Arc::new(Mutex::new(HashMap::new())),
             username_entries: Arc::new(Mutex::new(HashMap::new())),
+            last_prune: Mutex::new(Instant::now()),
             max_attempts,
             window_duration: Duration::from_secs(window_secs),
             lockout_duration: Duration::from_secs(lockout_secs),
@@ -47,6 +51,7 @@ impl AuthRateLimiter {
 
     #[must_use]
     pub fn check_rate_limit_with_username(&self, addr: IpAddr, username: Option<&str>) -> bool {
+        self.prune_if_due();
         if !self.check_entry_map(&self.ip_entries, &addr) {
             return false;
         }
@@ -91,7 +96,10 @@ impl AuthRateLimiter {
         username: Option<&str>,
         success: bool,
     ) {
-        self.record_entry(&self.ip_entries, addr, success);
+        self.prune_if_due();
+        if !success {
+            self.record_entry(&self.ip_entries, addr, false);
+        }
         if let Some(name) = username {
             self.record_entry(&self.username_entries, name.to_string(), success);
         }
@@ -125,14 +133,37 @@ impl AuthRateLimiter {
     }
 
     pub fn cleanup_expired(&self) {
+        self.prune(Instant::now());
+    }
+
+    fn prune_if_due(&self) {
         let now = Instant::now();
-        let lockout = self.lockout_duration;
+        {
+            let mut last_prune = self.last_prune.lock();
+            if now.duration_since(*last_prune) < self.window_duration {
+                return;
+            }
+            *last_prune = now;
+        }
+        self.prune(now);
+    }
+
+    fn prune(&self, now: Instant) {
         self.ip_entries
             .lock()
-            .retain(|_, entry| now.duration_since(entry.window_start) < lockout);
+            .retain(|_, entry| self.is_live(entry, now));
         self.username_entries
             .lock()
-            .retain(|_, entry| now.duration_since(entry.window_start) < lockout);
+            .retain(|_, entry| self.is_live(entry, now));
+    }
+
+    fn is_live(&self, entry: &RateLimitEntry, now: Instant) -> bool {
+        let lifetime = if entry.attempts >= self.max_attempts {
+            self.lockout_duration
+        } else {
+            self.window_duration
+        };
+        now.duration_since(entry.window_start) < lifetime
     }
 }
 
@@ -157,6 +188,29 @@ impl RateLimitedAuthProvider {
 
     pub fn with_default_limits(inner: Arc<dyn AuthProvider>) -> Self {
         Self::new(inner, Arc::new(AuthRateLimiter::default()))
+    }
+
+    fn limit_enhanced<'a>(
+        &'a self,
+        auth_method: &'a str,
+        client_addr: SocketAddr,
+        exchange: impl FnOnce() -> EnhancedAuthFuture<'a> + Send + 'a,
+    ) -> EnhancedAuthFuture<'a> {
+        Box::pin(async move {
+            let ip = client_addr.ip();
+            if !self.rate_limiter.check_rate_limit(ip) {
+                return Ok(EnhancedAuthResult::fail_with_reason(
+                    auth_method,
+                    ReasonCode::ConnectionRateExceeded,
+                    "Rate limit exceeded",
+                ));
+            }
+            let result = exchange().await?;
+            if result.status == EnhancedAuthStatus::Failed {
+                self.rate_limiter.record_attempt(ip, false);
+            }
+            Ok(result)
+        })
     }
 }
 
@@ -238,10 +292,20 @@ impl AuthProvider for RateLimitedAuthProvider {
         auth_data: Option<&'a [u8]>,
         client_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
-        Box::pin(async move {
+        self.inner
+            .authenticate_enhanced(auth_method, auth_data, client_id)
+    }
+
+    fn authenticate_enhanced_from<'a>(
+        &'a self,
+        auth_method: &'a str,
+        auth_data: Option<&'a [u8]>,
+        client_id: &'a str,
+        client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        self.limit_enhanced(auth_method, client_addr, move || {
             self.inner
-                .authenticate_enhanced(auth_method, auth_data, client_id)
-                .await
+                .authenticate_enhanced_from(auth_method, auth_data, client_id, client_addr)
         })
     }
 
@@ -252,10 +316,21 @@ impl AuthProvider for RateLimitedAuthProvider {
         client_id: &'a str,
         user_id: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
-        Box::pin(async move {
+        self.inner
+            .reauthenticate(auth_method, auth_data, client_id, user_id)
+    }
+
+    fn reauthenticate_from<'a>(
+        &'a self,
+        auth_method: &'a str,
+        auth_data: Option<&'a [u8]>,
+        client_id: &'a str,
+        user_id: Option<&'a str>,
+        client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        self.limit_enhanced(auth_method, client_addr, move || {
             self.inner
-                .reauthenticate(auth_method, auth_data, client_id, user_id)
-                .await
+                .reauthenticate_from(auth_method, auth_data, client_id, user_id, client_addr)
         })
     }
 
@@ -266,5 +341,64 @@ impl AuthProvider for RateLimitedAuthProvider {
         Box::pin(async move {
             self.inner.cleanup_session(user_id).await;
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    fn address(index: u16) -> IpAddr {
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, index))
+    }
+
+    fn tracked(limiter: &AuthRateLimiter) -> (usize, usize) {
+        (
+            limiter.ip_entries.lock().len(),
+            limiter.username_entries.lock().len(),
+        )
+    }
+
+    #[test]
+    fn entries_no_longer_checked_are_pruned_after_the_window() {
+        let limiter = AuthRateLimiter::new(3, 1, 1);
+        for index in 0..100 {
+            limiter.record_attempt_with_username(
+                address(index),
+                Some(&format!("user-{index}")),
+                false,
+            );
+        }
+        assert_eq!(tracked(&limiter), (100, 100));
+        std::thread::sleep(Duration::from_millis(1100));
+        assert!(limiter.check_rate_limit_with_username(address(1000), Some("someone-else")));
+        assert_eq!(
+            tracked(&limiter),
+            (0, 0),
+            "entries whose window ended must be removed without their key being checked again"
+        );
+    }
+
+    #[test]
+    fn locked_entries_outlive_the_window_until_the_lockout_ends() {
+        let limiter = AuthRateLimiter::new(2, 1, 30);
+        limiter.record_attempt(address(1), false);
+        limiter.record_attempt(address(1), false);
+        limiter.record_attempt(address(2), false);
+        std::thread::sleep(Duration::from_millis(1100));
+        limiter.record_attempt(address(3), false);
+        assert_eq!(tracked(&limiter), (2, 0));
+        assert!(!limiter.check_rate_limit(address(1)));
+        assert!(limiter.check_rate_limit(address(2)));
+    }
+
+    #[test]
+    fn cleanup_expired_keeps_counting_entries_inside_their_window() {
+        let limiter = AuthRateLimiter::new(5, 30, 1);
+        limiter.record_attempt(address(1), false);
+        std::thread::sleep(Duration::from_millis(1100));
+        limiter.cleanup_expired();
+        assert_eq!(tracked(&limiter), (1, 0));
     }
 }
