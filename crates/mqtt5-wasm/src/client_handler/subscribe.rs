@@ -3,7 +3,7 @@ use mqtt5::broker::storage::{QueuedMessage, StorageBackend, StoredSubscription};
 use mqtt5_protocol::error::{MqttError, Result};
 use mqtt5_protocol::packet::disconnect::DisconnectPacket;
 use mqtt5_protocol::packet::suback::{SubAckPacket, SubAckReasonCode};
-use mqtt5_protocol::packet::subscribe::SubscribePacket;
+use mqtt5_protocol::packet::subscribe::{RetainHandling, SubscribePacket};
 use mqtt5_protocol::packet::unsuback::{UnsubAckPacket, UnsubAckReasonCode};
 use mqtt5_protocol::packet::unsubscribe::UnsubscribePacket;
 use mqtt5_protocol::packet::Packet;
@@ -65,9 +65,9 @@ impl WasmClientHandler {
             let instance = self.subscription_instance(&filter.filter);
 
             let slot = self.router.lock_session(&client_id).await;
-            let (outcome, retained_cutoff) = self
+            let outcome = self
                 .router
-                .subscribe_for_retained(
+                .subscribe_as(
                     Some(self.generation),
                     SubscriptionRequest::new(client_id.clone(), filter.filter.clone(), granted_qos)
                         .with_subscription_id(subscription_id)
@@ -89,8 +89,13 @@ impl WasmClientHandler {
             self.persist_subscription(filter, granted_qos, subscription_id, change_only, instance)
                 .await?;
             drop(slot);
-            self.deliver_retained_for_filter(filter, granted_qos, subscription_id, retained_cutoff)
-                .await;
+            self.deliver_retained_for_filter(
+                filter,
+                granted_qos,
+                subscription_id,
+                outcome == Subscribed::New,
+            )
+            .await;
 
             successful_subscriptions.push((filter.filter.clone(), granted_qos as u8));
             reason_codes.push(SubAckReasonCode::from_qos(granted_qos));
@@ -215,16 +220,17 @@ impl WasmClientHandler {
         filter: &mqtt5_protocol::packet::subscribe::TopicFilter,
         granted_qos: QoS,
         subscription_id: Option<u32>,
-        retained_cutoff: Option<u64>,
+        is_new: bool,
     ) {
-        let Some(cutoff) = retained_cutoff else {
-            return;
+        let should_send = match filter.options.retain_handling {
+            RetainHandling::SendAtSubscribe => true,
+            RetainHandling::SendAtSubscribeIfNew => is_new,
+            RetainHandling::DoNotSend => false,
         };
-        for mut publish in self
-            .router
-            .retained_messages_before(&filter.filter, cutoff)
-            .await
-        {
+        if !should_send {
+            return;
+        }
+        for mut publish in self.router.get_retained_messages(&filter.filter).await {
             publish.retain = true;
             publish.qos = QoS::from((publish.qos as u8).min(granted_qos as u8));
             if let Some(id) = subscription_id {
