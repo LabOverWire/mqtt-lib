@@ -272,6 +272,28 @@ async fn retained_publish_replacing_a_stored_topic_at_the_count_limit_is_accepte
     assert!(second_retained_publish_accepted("limits/existing").await);
 }
 
+#[tokio::test]
+async fn sys_topics_leave_the_retained_count_limit_to_clients() {
+    let config = BrokerConfig::default()
+        .with_max_retained_messages(2)
+        .with_sys_topics_interval(Duration::from_millis(50))
+        .with_bind_address("127.0.0.1:0".parse::<SocketAddr>().expect("bind address"))
+        .with_storage(StorageConfig::default().with_backend(StorageBackend::Memory));
+    let broker = TestBroker::start_with_config(config).await;
+    sleep(Duration::from_millis(300)).await;
+    let accepted = [
+        try_publish_retained(&broker, "limits/first").await,
+        try_publish_retained(&broker, "limits/second").await,
+        try_publish_retained(&broker, "limits/third").await,
+    ];
+    assert_eq!(
+        accepted,
+        [true, true, false],
+        "clients get the whole limit, and no more"
+    );
+    assert_eq!(retained_on(&broker, "limits/second").await, 1);
+}
+
 async fn dollar_will_past_the_count_limit(topic: &str) -> FiredWill {
     let broker = broker_with(BrokerConfig::default().with_max_retained_messages(1)).await;
     publish_retained(&broker, "limits/existing").await;

@@ -274,11 +274,45 @@ impl Subscription {
     }
 }
 
+#[derive(Default)]
+struct RetainedStore {
+    messages: HashMap<String, RetainedMessage>,
+    broker_topics: HashSet<String>,
+}
+
+impl RetainedStore {
+    fn client_count(&self) -> usize {
+        self.messages.len() - self.broker_topics.len()
+    }
+
+    fn holds_client_message(&self, topic: &str) -> bool {
+        self.messages.contains_key(topic) && !self.broker_topics.contains(topic)
+    }
+
+    fn full_for_client(&self, topic: &str, max_messages: usize) -> bool {
+        max_messages > 0 && !self.holds_client_message(topic) && self.client_count() >= max_messages
+    }
+
+    fn insert(&mut self, topic: String, message: RetainedMessage, broker_owned: bool) {
+        if broker_owned {
+            self.broker_topics.insert(topic.clone());
+        } else {
+            self.broker_topics.remove(&topic);
+        }
+        self.messages.insert(topic, message);
+    }
+
+    fn remove(&mut self, topic: &str) {
+        self.messages.remove(topic);
+        self.broker_topics.remove(topic);
+    }
+}
+
 /// Message router for the broker
 pub struct MessageRouter {
     exact_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
     wildcard_subscriptions: Arc<RwLock<HashMap<String, Vec<Subscription>>>>,
-    retained_messages: Arc<RwLock<HashMap<String, RetainedMessage>>>,
+    retained_messages: RwLock<RetainedStore>,
     clients: Arc<RwLock<HashMap<String, ClientInfo>>>,
     storage: Option<Arc<DynamicStorage>>,
     share_group_counters: Arc<RwLock<ShareGroupCounters>>,
@@ -465,7 +499,7 @@ impl MessageRouter {
         Self {
             exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            retained_messages: Arc::new(RwLock::new(HashMap::new())),
+            retained_messages: RwLock::new(RetainedStore::default()),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: None,
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
@@ -504,7 +538,7 @@ impl MessageRouter {
         Self {
             exact_subscriptions: Arc::new(RwLock::new(HashMap::new())),
             wildcard_subscriptions: Arc::new(RwLock::new(HashMap::new())),
-            retained_messages: Arc::new(RwLock::new(HashMap::new())),
+            retained_messages: RwLock::new(RetainedStore::default()),
             clients: Arc::new(RwLock::new(HashMap::new())),
             storage: Some(storage),
             share_group_counters: Arc::new(RwLock::new(HashMap::new())),
@@ -622,10 +656,13 @@ impl MessageRouter {
             let mut retained = self.retained_messages.write().await;
 
             for (topic, msg) in stored_messages {
-                retained.insert(topic, msg);
+                retained.insert(topic, msg, false);
             }
 
-            debug!("Loaded {} retained messages from storage", retained.len());
+            debug!(
+                "Loaded {} retained messages from storage",
+                retained.messages.len()
+            );
         }
         Ok(())
     }
@@ -1668,9 +1705,7 @@ impl MessageRouter {
             {
                 let mut retained = self.retained_messages.write().await;
                 let too_large = max_size > 0 && publish.payload.len() > max_size;
-                let store_full = max_count > 0
-                    && !retained.contains_key(&publish.topic_name)
-                    && retained.len() >= max_count;
+                let store_full = retained.full_for_client(&publish.topic_name, max_count);
                 if retained_limits_apply && (too_large || store_full) {
                     warn!(
                         topic = %publish.topic_name,
@@ -1681,7 +1716,11 @@ impl MessageRouter {
                     );
                     return;
                 }
-                retained.insert(publish.topic_name.clone(), retained_msg.clone());
+                retained.insert(
+                    publish.topic_name.clone(),
+                    retained_msg.clone(),
+                    !retained_limits_apply,
+                );
             }
             debug!("Stored retained message for topic: {}", publish.topic_name);
             (false, Some(retained_msg))
@@ -2040,6 +2079,7 @@ impl MessageRouter {
     pub async fn get_retained_messages(&self, topic_filter: &str) -> Vec<PublishPacket> {
         let retained = self.retained_messages.read().await;
         retained
+            .messages
             .iter()
             .filter(|(topic, msg)| topic_matches_filter(topic, topic_filter) && !msg.is_expired())
             .map(|(_, msg)| msg.to_publish_packet())
@@ -2057,7 +2097,7 @@ impl MessageRouter {
     }
 
     pub async fn retained_count(&self) -> usize {
-        self.retained_messages.read().await.len()
+        self.retained_messages.read().await.messages.len()
     }
 
     pub async fn subscription_count_for_client(&self, client_id: &str) -> usize {
@@ -2111,15 +2151,15 @@ impl MessageRouter {
 
     pub async fn has_retained_message(&self, topic: &str) -> bool {
         let retained = self.retained_messages.read().await;
-        retained.contains_key(topic)
+        retained.messages.contains_key(topic)
     }
 
     pub async fn retained_store_full(&self, topic: &str) -> bool {
         let max_retained_messages = self.max_retained_messages();
-        let retained = self.retained_messages.read().await;
-        max_retained_messages > 0
-            && !retained.contains_key(topic)
-            && retained.len() >= max_retained_messages
+        self.retained_messages
+            .read()
+            .await
+            .full_for_client(topic, max_retained_messages)
     }
 
     pub async fn load_change_only_state(&self, client_id: &str, state: ChangeOnlyState) {
@@ -2456,6 +2496,39 @@ mod tests {
         uptime.retain = true;
         router.route_sys_message(&uptime).await;
         assert_eq!(router.retained_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn sys_topics_do_not_use_the_retained_count_limit() {
+        let router = MessageRouter::new().with_retained_limits(1, 0);
+        for topic in ["$SYS/broker/uptime", "$SYS/broker/version"] {
+            let mut sys = PublishPacket::new(topic, &b"1"[..], QoS::AtMostOnce);
+            sys.retain = true;
+            router.route_sys_message(&sys).await;
+        }
+        assert!(!router.retained_store_full("limits/a").await);
+        retain(&router, "limits/a", b"x").await;
+        assert_eq!(
+            retained_payload(&router, "limits/a").await,
+            Some(Bytes::from_static(b"x"))
+        );
+        assert!(router.retained_store_full("limits/b").await);
+        retain(&router, "limits/b", b"x").await;
+        assert_eq!(retained_payload(&router, "limits/b").await, None);
+        assert_eq!(router.retained_count().await, 3);
+    }
+
+    #[tokio::test]
+    async fn a_client_message_on_a_sys_topic_takes_a_slot_until_the_broker_replaces_it() {
+        let router = MessageRouter::new().with_retained_limits(1, 0);
+        retain(&router, "$SYS/broker/uptime", b"x").await;
+        assert!(router.retained_store_full("limits/a").await);
+        let mut sys = PublishPacket::new("$SYS/broker/uptime", &b"1"[..], QoS::AtMostOnce);
+        sys.retain = true;
+        router.route_sys_message(&sys).await;
+        assert!(!router.retained_store_full("limits/a").await);
+        retain(&router, "limits/a", b"x").await;
+        assert!(router.retained_store_full("$SYS/broker/uptime").await);
     }
 
     #[tokio::test]
