@@ -1372,9 +1372,9 @@ impl MessageRouter {
                 1 => existing_pos.is_none(),
                 _ => false,
             };
-        subscription.retained_cutoff =
+        let retained_cutoff =
             owes_retained.then(|| self.retain_clock.fetch_add(1, Ordering::SeqCst));
-        let retained_cutoff = subscription.retained_cutoff;
+        subscription.retained_cutoff = retained_cutoff.filter(|_| existing_pos.is_none());
         let outcome = if let Some(pos) = existing_pos {
             subs[pos] = subscription;
             debug!(
@@ -4119,5 +4119,114 @@ mod tests {
         );
         assert_eq!(storage.get_queued_messages("kept").await.unwrap().len(), 2);
         assert_eq!(queue_files(dir.path(), "kept"), 2);
+    }
+
+    struct RetainGate {
+        entered: AtomicUsize,
+        release: tokio::sync::watch::Receiver<bool>,
+    }
+
+    impl BrokerEventHandler for RetainGate {
+        fn on_retained_set<'a>(
+            &'a self,
+            event: RetainedSetEvent,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+            Box::pin(async move {
+                if event.topic.as_ref() != "replaced/t" {
+                    return;
+                }
+                self.entered.fetch_add(1, Ordering::SeqCst);
+                let mut release = self.release.clone();
+                while !*release.borrow_and_update() {
+                    if release.changed().await.is_err() {
+                        return;
+                    }
+                }
+            })
+        }
+    }
+
+    async fn replace_subscription_while_retained_publishes_wait(
+        resubscribe_rh: u8,
+    ) -> (Vec<Bytes>, Vec<Bytes>) {
+        let (release_tx, release_rx) = tokio::sync::watch::channel(false);
+        let gate = Arc::new(RetainGate {
+            entered: AtomicUsize::new(0),
+            release: release_rx,
+        });
+        let router = Arc::new(MessageRouter::new().with_event_handler(gate.clone()));
+        let mut rx = TestLanes::new(100);
+        let (dtx, disconnect_rx) = tokio::sync::oneshot::channel();
+        router
+            .register_client(
+                "replaced".to_string(),
+                rx.lanes(),
+                router.queue_handle("replaced"),
+                dtx,
+            )
+            .await;
+        let request = || SubscriptionRequest::new("replaced", "replaced/t", QoS::AtLeastOnce);
+        router
+            .subscribe_for_retained(None, request().with_retain_handling(0))
+            .await
+            .unwrap();
+        let spawn_publish = |payload: &'static [u8]| {
+            let mut publish = PublishPacket::new("replaced/t", payload, QoS::AtLeastOnce);
+            publish.retain = true;
+            let publisher = Arc::clone(&router);
+            tokio::spawn(async move {
+                publisher.route_message(&publish, Some("pub")).await;
+            })
+        };
+        let first = spawn_publish(b"v1");
+        while gate.entered.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+        let second = spawn_publish(b"v2");
+        while gate.entered.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+        let (outcome, cutoff) = router
+            .subscribe_for_retained(None, request().with_retain_handling(resubscribe_rh))
+            .await
+            .unwrap();
+        assert_eq!(outcome, Subscribed::Updated);
+        release_tx.send(true).unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        let mut live = Vec::new();
+        while let Ok(message) = rx.try_recv() {
+            live.push(message.publish.payload.clone());
+        }
+        let snapshot = match cutoff {
+            Some(cutoff) => router
+                .retained_messages_before("replaced/t", cutoff)
+                .await
+                .into_iter()
+                .map(|m| m.payload.clone())
+                .collect(),
+            None => Vec::new(),
+        };
+        drop(disconnect_rx);
+        (live, snapshot)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replaced_subscription_keeps_the_retained_publishes_routed_while_subscribed() {
+        let (live, snapshot) = replace_subscription_while_retained_publishes_wait(0).await;
+        let all: Vec<Bytes> = live.iter().chain(snapshot.iter()).cloned().collect();
+        assert!(
+            all.iter().any(|p| p.as_ref() == b"v1"),
+            "v1 was published while subscribed and never delivered: live={live:?} snapshot={snapshot:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn control_a_subscription_replaced_without_retained_gets_them_live() {
+        let (live, snapshot) = replace_subscription_while_retained_publishes_wait(2).await;
+        assert!(
+            live.iter().any(|p| p.as_ref() == b"v1"),
+            "v1 not delivered live: live={live:?} snapshot={snapshot:?}"
+        );
     }
 }
