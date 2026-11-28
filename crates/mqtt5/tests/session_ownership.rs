@@ -783,7 +783,7 @@ async fn aborted_takeover_never_replaces_a_live_owners_session() {
             .map(|session| {
                 (
                     session.connection_token,
-                    session.subscriptions.contains_key("abort/t"),
+                    session.subscription("abort/t", None).is_some(),
                 )
             });
         if still_served(&mut first).await {
@@ -944,7 +944,7 @@ async fn file_backend_displaced_subscribe_writes_nothing() {
         .expect("read")
         .expect("session of the live successor");
     assert!(
-        !stored.subscriptions.contains_key("slow/a"),
+        stored.subscription("slow/a", None).is_none(),
         "the displaced connection's late SUBSCRIBE must not reach the successor's stored session"
     );
     end(second).await;
@@ -1061,7 +1061,7 @@ async fn displaced_unsubscribe_keeps_the_successors_route() {
         kept,
         "a displaced connection's UNSUBSCRIBE removed the successor's route"
     );
-    assert!(stored.subscriptions.contains_key("keep/x"));
+    assert!(stored.subscription("keep/x", None).is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1098,7 +1098,7 @@ async fn displaced_unsubscribe_waiting_on_the_slot_is_fenced() {
         kept,
         "an UNSUBSCRIBE queued behind the successor's claim removed the successor's route"
     );
-    assert!(stored.subscriptions.contains_key("keep/x"));
+    assert!(stored.subscription("keep/x", None).is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1672,7 +1672,8 @@ async fn legacy_session_and_queue_deliver_as_before_and_get_instances_at_claim()
         .expect("session");
     assert_eq!(stored.subscriptions.len(), 1);
     assert_ne!(
-        stored.subscriptions["legacy/x"].instance, 0,
+        stored.subscription("legacy/x", None).unwrap().instance,
+        0,
         "a subscription stored without an instance gets one when the session is claimed"
     );
     publish_at_least_once(&mut publisher, "legacy/x", 1).await;
