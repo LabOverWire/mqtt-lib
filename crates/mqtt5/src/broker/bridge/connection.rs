@@ -395,6 +395,7 @@ struct Ingress {
 /// subscription identifier so overlapping filters route each copy exactly once.
 struct IngressFilter {
     remote_filter: String,
+    identifier: u32,
     qos: QoS,
     mappings: Vec<TopicMappingCore>,
 }
@@ -473,6 +474,31 @@ fn reached_filters(filter: &str, filters: &[IngressFilter], with_identifiers: bo
         .map(|mapped| mapped.remote_filter.clone())
         .filter(|mapped| mapped == filter || (!with_identifiers && covers(mapped, filter)))
         .collect()
+}
+
+const MAX_SUBSCRIPTION_IDENTIFIER: u32 = 268_435_455;
+
+fn filter_hash(filter: &str) -> u32 {
+    let hash = filter.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
+    hash % MAX_SUBSCRIPTION_IDENTIFIER + 1
+}
+
+fn stable_identifiers(filters: &[&str]) -> Vec<u32> {
+    let mut by_name: Vec<usize> = (0..filters.len()).collect();
+    by_name.sort_by_key(|index| filters[*index]);
+    let mut identifiers = vec![0; filters.len()];
+    let mut taken: Vec<u32> = Vec::with_capacity(filters.len());
+    for index in by_name {
+        let mut identifier = filter_hash(filters[index]);
+        while taken.contains(&identifier) {
+            identifier = identifier % MAX_SUBSCRIPTION_IDENTIFIER + 1;
+        }
+        taken.push(identifier);
+        identifiers[index] = identifier;
+    }
+    identifiers
 }
 
 fn is_shared(filter: &str) -> bool {
@@ -1340,31 +1366,43 @@ impl BridgeConnection {
 
     /// Groups the incoming mappings by remote filter, in configuration order.
     fn ingress_filters(&self) -> Vec<IngressFilter> {
-        let mut filters: Vec<IngressFilter> = Vec::new();
+        let mut grouped: Vec<(String, QoS, Vec<TopicMappingCore>)> = Vec::new();
         for mapping in &self.config.topics {
             let core = TopicMappingCore::from(mapping);
             if !core.direction.allows_incoming() {
                 continue;
             }
             let remote_filter = core.apply_remote_prefix(&core.pattern);
-            match filters
+            match grouped
                 .iter_mut()
-                .find(|filter| filter.remote_filter == remote_filter)
+                .find(|(filter, _, _)| *filter == remote_filter)
             {
-                Some(filter) => {
-                    if core.qos as u8 > filter.qos as u8 {
-                        filter.qos = core.qos;
+                Some((_, qos, mappings)) => {
+                    if core.qos as u8 > *qos as u8 {
+                        *qos = core.qos;
                     }
-                    filter.mappings.push(core);
+                    mappings.push(core);
                 }
-                None => filters.push(IngressFilter {
-                    remote_filter,
-                    qos: core.qos,
-                    mappings: vec![core],
-                }),
+                None => grouped.push((remote_filter, core.qos, vec![core])),
             }
         }
-        filters
+        let names: Vec<&str> = grouped
+            .iter()
+            .map(|(filter, _, _)| filter.as_str())
+            .collect();
+        let identifiers = stable_identifiers(&names);
+        grouped
+            .into_iter()
+            .zip(identifiers)
+            .map(
+                |((remote_filter, qos, mappings), identifier)| IngressFilter {
+                    remote_filter,
+                    identifier,
+                    qos,
+                    mappings,
+                },
+            )
+            .collect()
     }
 
     fn ingress(&self) -> &Ingress {
@@ -1433,10 +1471,12 @@ impl BridgeConnection {
         let mut subscriptions: Vec<(String, QoS, Option<u32>)> = if with_identifiers {
             filters
                 .iter()
-                .enumerate()
-                .map(|(index, filter)| {
-                    let identifier = u32::try_from(index + 1).unwrap_or(u32::MAX);
-                    (filter.remote_filter.clone(), filter.qos, Some(identifier))
+                .map(|filter| {
+                    (
+                        filter.remote_filter.clone(),
+                        filter.qos,
+                        Some(filter.identifier),
+                    )
                 })
                 .collect()
         } else {
@@ -1630,11 +1670,24 @@ impl BridgeConnection {
             publish.properties.inject_sender(None);
             publish.properties.inject_client_id(None);
 
-            let mappings: Vec<&TopicMappingCore> = if ids.is_empty() {
-                if !noted_missing_ids.swap(true, Ordering::Relaxed) {
+            let identified: Vec<&IngressFilter> = filters
+                .iter()
+                .filter(|filter| ids.contains(&filter.identifier))
+                .collect();
+            let selected: Vec<&IngressFilter> = if identified.is_empty() {
+                if ids.is_empty() {
+                    if !noted_missing_ids.swap(true, Ordering::Relaxed) {
+                        debug!(
+                            bridge = %bridge_name,
+                            "Remote sends no subscription identifiers; routing by topic"
+                        );
+                    }
+                } else {
                     debug!(
                         bridge = %bridge_name,
-                        "Remote sends no subscription identifiers; routing by topic"
+                        topic = %publish.topic_name,
+                        ?ids,
+                        "Subscription identifiers name no current filter; routing by topic"
                     );
                 }
                 filters
@@ -1643,16 +1696,14 @@ impl BridgeConnection {
                         let (remote_filter, _) = parse_shared_subscription(&filter.remote_filter);
                         topic_matches_filter(&publish.topic_name, remote_filter)
                     })
-                    .flat_map(|filter| filter.mappings.iter())
                     .collect()
             } else {
-                ids.iter()
-                    .filter_map(|id| usize::try_from(*id).ok())
-                    .filter_map(|id| id.checked_sub(1))
-                    .filter_map(|index| filters.get(index))
-                    .flat_map(|filter| filter.mappings.iter())
-                    .collect()
+                identified
             };
+            let mappings: Vec<&TopicMappingCore> = selected
+                .into_iter()
+                .flat_map(|filter| filter.mappings.iter())
+                .collect();
 
             let packets: Vec<PublishPacket> = mappings
                 .into_iter()
@@ -1902,15 +1953,39 @@ impl BridgeConnection {
 
 #[cfg(test)]
 mod tests {
-    use super::{filters_overlap, subscriptions_without_identifiers, IngressFilter};
+    use super::{
+        filter_hash, filters_overlap, stable_identifiers, subscriptions_without_identifiers,
+        IngressFilter, MAX_SUBSCRIPTION_IDENTIFIER,
+    };
     use crate::QoS;
 
     fn filter(remote_filter: &str, qos: QoS) -> IngressFilter {
         IngressFilter {
             remote_filter: remote_filter.to_string(),
+            identifier: filter_hash(remote_filter),
             qos,
             mappings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn identifiers_do_not_depend_on_filter_order() {
+        let forward = stable_identifiers(&["a/#", "b/#", "$share/g/c/+"]);
+        let reversed = stable_identifiers(&["$share/g/c/+", "b/#", "a/#"]);
+        assert_eq!(forward, vec![reversed[2], reversed[1], reversed[0]]);
+        assert_eq!(stable_identifiers(&["b/#"]), vec![forward[1]]);
+    }
+
+    #[test]
+    fn colliding_identifiers_are_distinct_and_in_range() {
+        let identifiers = stable_identifiers(&["a/#", "a/#", "a/#"]);
+        assert_eq!(identifiers[0], filter_hash("a/#"));
+        assert_ne!(identifiers[0], identifiers[1]);
+        assert_ne!(identifiers[1], identifiers[2]);
+        assert_ne!(identifiers[0], identifiers[2]);
+        assert!(identifiers
+            .iter()
+            .all(|identifier| (1..=MAX_SUBSCRIPTION_IDENTIFIER).contains(identifier)));
     }
 
     #[test]
