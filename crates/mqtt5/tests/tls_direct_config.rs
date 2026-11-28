@@ -350,7 +350,8 @@ async fn connect_with_tls_reconnects_with_the_configuration_it_was_given() {
     // A TLS configuration stored since is for connections made from a URL.
     client
         .set_tls_config(None, None, Some(common::other_ca()))
-        .await;
+        .await
+        .unwrap();
     cut.notify_waiters();
     tokio::time::timeout(Duration::from_secs(10), async {
         while connections.load(Ordering::SeqCst) < 2 {

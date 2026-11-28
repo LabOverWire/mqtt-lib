@@ -83,7 +83,8 @@ async fn mqtt_client_with_cert_and_key_but_no_ca_trusts_platform_roots() {
             Some(std::fs::read(CLIENT_KEY).expect("read client key")),
             None,
         )
-        .await;
+        .await
+        .unwrap();
 
     // The test server stops after the WebSocket handshake and never answers
     // CONNECT, so only the TLS handshake it observed is checked.
