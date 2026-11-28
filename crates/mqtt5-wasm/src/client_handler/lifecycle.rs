@@ -81,13 +81,22 @@ impl WasmClientHandler {
         message: &str,
         writer: &SharedWriter,
     ) -> Result<()> {
-        warn!("{message}");
-        let refusal = if self.pending_connect.is_some() {
-            Packet::ConnAck(self.new_connack(false, reason_code))
-        } else {
-            Packet::Disconnect(DisconnectPacket::new(reason_code))
-        };
-        Self::write_packet(&refusal, writer)?;
+        warn!(reason_code = ?reason_code, "{message}");
+        if self.pending_connect.is_some() {
+            Self::write_packet(
+                &Packet::ConnAck(self.new_connack(false, reason_code)),
+                writer,
+            )?;
+        } else if self.protocol_version == 5 {
+            let disconnect_reason = match reason_code {
+                ReasonCode::BadAuthenticationMethod => ReasonCode::ProtocolError,
+                other => other,
+            };
+            Self::write_packet(
+                &Packet::Disconnect(DisconnectPacket::new(disconnect_reason)),
+                writer,
+            )?;
+        }
         Err(MqttError::ProtocolError(message.to_string()))
     }
 
@@ -127,7 +136,9 @@ impl WasmClientHandler {
             (ReasonCode::ContinueAuthentication, AuthState::InProgress) => {
                 self.handle_continue_auth(&expected, &auth, writer).await
             }
-            (ReasonCode::ReAuthenticate, AuthState::Completed) => {
+            (ReasonCode::ReAuthenticate, AuthState::Completed | AuthState::InProgress)
+                if self.pending_connect.is_none() =>
+            {
                 let client_id = self.client_id.clone().unwrap_or_default();
                 let result = self
                     .auth_provider

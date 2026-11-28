@@ -36,7 +36,10 @@ async fn client_holding_a_session_ticket(scheme: &str, addr: SocketAddr) -> Mqtt
     let client = MqttClient::with_options(
         ConnectOptions::new(format!("early-timeout-{scheme}")).with_automatic_reconnect(false),
     );
-    client.set_tls_config(None, None, Some(test_ca())).await;
+    client
+        .set_tls_config(None, None, Some(test_ca()))
+        .await
+        .unwrap();
     client.set_quic_early_data(true).await;
     client.set_quic_connect_timeout(CONNECT_TIMEOUT).await;
     let mut zero_rtt = false;
