@@ -1,4 +1,4 @@
-use mqtt5::{ConnectOptions, MqttClient};
+use mqtt5::{ConnectOptions, MqttClient, SubscribeOptions};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -99,10 +99,26 @@ fn persistent(id: &str) -> ConnectOptions {
         .with_reconnect_delay(Duration::from_millis(100), Duration::from_millis(200))
 }
 
+#[derive(Clone, Copy)]
+enum Subscription {
+    Plain,
+    DeferredAck,
+}
+
+fn options(id: &str, subscription: Subscription) -> ConnectOptions {
+    match subscription {
+        Subscription::Plain => persistent(id),
+        Subscription::DeferredAck => persistent(id)
+            .with_deferred_ack(true)
+            .with_receive_maximum(16),
+    }
+}
+
 async fn events_after_interrupted_restore(
     first_id: &str,
     second_id: &str,
     second_present: bool,
+    subscription: Subscription,
 ) -> Vec<usize> {
     let (url, events) = scripted_server(vec![
         (false, Script::SubAck),
@@ -112,13 +128,23 @@ async fn events_after_interrupted_restore(
     .await;
     let client = MqttClient::new(first_id);
     client
-        .connect_with_options(&url, persistent(first_id))
+        .connect_with_options(&url, options(first_id, subscription))
         .await
         .unwrap();
-    client.subscribe("t/a", |_message| {}).await.unwrap();
+    match subscription {
+        Subscription::Plain => {
+            client.subscribe("t/a", |_| {}).await.unwrap();
+        }
+        Subscription::DeferredAck => {
+            client
+                .subscribe_with_ack("t/a", SubscribeOptions::default(), |_, _| {})
+                .await
+                .unwrap();
+        }
+    }
     client.disconnect().await.unwrap();
     let reconnected = client
-        .connect_with_options(&url, persistent(second_id))
+        .connect_with_options(&url, options(second_id, subscription))
         .await;
     tracing::info!(?reconnected, "second connect");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -132,7 +158,13 @@ async fn events_after_interrupted_restore(
 
 #[tokio::test]
 async fn a_lost_session_resubscribe_cut_off_is_retried_when_the_session_resumes() {
-    let recorded = events_after_interrupted_restore("interrupted-a", "interrupted-a", false).await;
+    let recorded = events_after_interrupted_restore(
+        "interrupted-a",
+        "interrupted-a",
+        false,
+        Subscription::Plain,
+    )
+    .await;
     assert_eq!(
         recorded,
         vec![100, 0, 101, 1, 102, 2],
@@ -142,7 +174,29 @@ async fn a_lost_session_resubscribe_cut_off_is_retried_when_the_session_resumes(
 
 #[tokio::test]
 async fn a_new_id_resubscribe_cut_off_is_retried_when_the_session_resumes() {
-    let recorded = events_after_interrupted_restore("interrupted-b", "interrupted-c", true).await;
+    let recorded = events_after_interrupted_restore(
+        "interrupted-b",
+        "interrupted-c",
+        true,
+        Subscription::Plain,
+    )
+    .await;
+    assert_eq!(
+        recorded,
+        vec![100, 0, 101, 1, 102, 2],
+        "CONNECT (100 + n) and SUBSCRIBE (n) per connection index"
+    );
+}
+
+#[tokio::test]
+async fn a_lost_session_deferred_ack_resubscribe_cut_off_is_retried_when_the_session_resumes() {
+    let recorded = events_after_interrupted_restore(
+        "interrupted-ack",
+        "interrupted-ack",
+        false,
+        Subscription::DeferredAck,
+    )
+    .await;
     assert_eq!(
         recorded,
         vec![100, 0, 101, 1, 102, 2],
@@ -165,7 +219,7 @@ async fn control_a_settled_restore_is_not_repeated_when_the_session_resumes() {
             .await
             .unwrap();
         if events.lock().unwrap().len() == 1 {
-            client.subscribe("t/a", |_message| {}).await.unwrap();
+            client.subscribe("t/a", |_| {}).await.unwrap();
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         client.disconnect().await.unwrap();
