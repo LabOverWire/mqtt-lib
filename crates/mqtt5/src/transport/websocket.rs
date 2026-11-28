@@ -43,7 +43,7 @@ use crate::error::{MqttError, Result};
 use crate::packet::Packet;
 use crate::time::Duration;
 use crate::transport::packet_io::{decode_buffered_packet, PacketReader, PacketWriter};
-use crate::transport::tls::{SystemRoots, TlsConfig};
+use crate::transport::tls::{native_roots_client_config, SystemRoots, TlsConfig};
 use crate::Transport;
 use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{stream::SplitSink, stream::SplitStream, StreamExt};
@@ -874,13 +874,14 @@ impl Transport for WebSocketTransport {
 
         let request = self.config.build_handshake_request()?;
 
-        // With no TLS configuration, tokio-tungstenite builds its own client
-        // config from the platform's native root certificates.
-        let connector = match self.config.tls_config.as_ref() {
-            Some(tls_config) if self.config.is_secure() => Some(Connector::Rustls(Arc::new(
-                tls_config.client_config_with(SystemRoots::Native)?,
-            ))),
-            _ => None,
+        let connector = if self.config.is_secure() {
+            let client_config = match self.config.tls_config.as_ref() {
+                Some(tls_config) => tls_config.client_config_with(SystemRoots::Native)?,
+                None => native_roots_client_config()?,
+            };
+            Some(Connector::Rustls(Arc::new(client_config)))
+        } else {
+            None
         };
 
         let secure = self.config.is_secure();

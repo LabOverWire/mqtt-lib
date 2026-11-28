@@ -139,7 +139,10 @@ impl QuicAcceptorConfig {
                 })?;
             }
 
-            let verifier_builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+            let verifier_builder = WebPkiClientVerifier::builder_with_provider(
+                Arc::new(root_store),
+                Arc::clone(&crypto_provider),
+            );
 
             let client_verifier = if self.require_client_cert {
                 verifier_builder.build()

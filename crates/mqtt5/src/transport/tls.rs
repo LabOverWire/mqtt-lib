@@ -4,7 +4,7 @@ use crate::time::Duration;
 use crate::Transport;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{ClientConfig, ConfigBuilder, RootCertStore, WantsVerifier};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
@@ -344,7 +344,6 @@ impl TlsConfig {
         let config_builder = if self.verify_server_cert {
             let mut root_store = RootCertStore::empty();
 
-            // Add custom root certificates
             if let Some(ref root_certs) = self.root_certs {
                 for cert in root_certs {
                     root_store.add(cert.clone()).map_err(|e| {
@@ -353,15 +352,13 @@ impl TlsConfig {
                 }
             }
 
-            // Add system roots if requested
             if self.use_system_roots {
                 system_roots.add_to(&mut root_store)?;
             }
 
-            ClientConfig::builder().with_root_certificates(root_store)
+            client_config_builder()?.with_root_certificates(root_store)
         } else {
-            // Disable certificate verification for testing with self-signed certs
-            ClientConfig::builder()
+            client_config_builder()?
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerification))
         };
@@ -379,13 +376,27 @@ impl TlsConfig {
             config_builder.with_no_client_auth()
         };
 
-        // Configure ALPN protocols if provided
         if let Some(ref protocols) = self.alpn_protocols {
             config.alpn_protocols.clone_from(protocols);
         }
 
         Ok(config)
     }
+}
+
+fn client_config_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>> {
+    ClientConfig::builder_with_provider(crate::crypto::crypto_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| MqttError::ProtocolError(format!("Failed to set protocol versions: {e}")))
+}
+
+#[cfg(feature = "transport-websocket")]
+pub(crate) fn native_roots_client_config() -> Result<ClientConfig> {
+    let mut root_store = RootCertStore::empty();
+    add_native_roots(&mut root_store)?;
+    Ok(client_config_builder()?
+        .with_root_certificates(root_store)
+        .with_no_client_auth())
 }
 
 /// Where the roots added by [`TlsConfig::use_system_roots`] come from
