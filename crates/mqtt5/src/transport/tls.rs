@@ -385,7 +385,7 @@ impl TlsConfig {
 }
 
 fn client_config_builder() -> Result<ConfigBuilder<ClientConfig, WantsVerifier>> {
-    ClientConfig::builder_with_provider(crate::crypto::ring_provider())
+    ClientConfig::builder_with_provider(crate::crypto::crypto_provider())
         .with_safe_default_protocol_versions()
         .map_err(|e| MqttError::ProtocolError(format!("Failed to set protocol versions: {e}")))
 }

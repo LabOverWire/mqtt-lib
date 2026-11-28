@@ -108,7 +108,7 @@ impl TlsAcceptorConfig {
     ///
     /// Returns an error if the configuration is invalid
     pub fn build_server_config(&self) -> Result<ServerConfig> {
-        let provider = crate::crypto::ring_provider();
+        let provider = crate::crypto::crypto_provider();
         let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
             .with_safe_default_protocol_versions()
             .map_err(|e| {
