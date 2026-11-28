@@ -1872,6 +1872,113 @@ mod tests {
         assert_eq!(retained_on_a_second_subscribe(0x00).await, 1);
     }
 
+    fn retained_publish_bytes(topic: &str, qos: u8) -> Vec<u8> {
+        let topic_len = u8::try_from(topic.len()).unwrap();
+        let mut bytes = vec![0x31 | (qos << 1), 0x00, 0x00, topic_len];
+        bytes.extend_from_slice(topic.as_bytes());
+        bytes.extend_from_slice(&[0x00, 0x01, 0x00]);
+        bytes.extend_from_slice(b"kept");
+        bytes[1] = u8::try_from(bytes.len() - 2).unwrap();
+        bytes
+    }
+
+    async fn retained_by_a_client(broker: &WasmBroker, topic: &str, qos: u8) {
+        let publisher = connected(broker, connect_options("retainer", true, 0)).await;
+        publisher.send_raw(&retained_publish_bytes(topic, qos));
+        let ack = publisher.wait_for(4).await;
+        if qos == 2 {
+            assert_eq!(ack.first(), Some(&0x50), "expected PUBREC");
+            publisher.clear();
+            publisher.send_raw(&[0x62, 0x02, 0x00, 0x01]);
+            assert_eq!(
+                publisher.wait_for(4).await.first(),
+                Some(&0x70),
+                "expected PUBCOMP"
+            );
+        } else {
+            assert_eq!(ack.first(), Some(&0x40), "expected PUBACK");
+        }
+        for _ in 0..100 {
+            if !broker.router.get_retained_messages(topic).await.is_empty() {
+                return;
+            }
+            sleep(10).await;
+        }
+        panic!("the retained message was not stored");
+    }
+
+    async fn first_frames_after_subscribing(
+        client: &Client,
+        topic: &str,
+        qos: u8,
+    ) -> Vec<(u8, Vec<u8>)> {
+        client.send_raw(&subscribe_bytes_at(topic, qos));
+        for _ in 0..300 {
+            if frames(&client.received()).len() >= 2 {
+                break;
+            }
+            sleep(10).await;
+        }
+        frames(&client.received())
+    }
+
+    async fn retained_delivery_after_the_suback(qos: u8) {
+        let topic = format!("kept/suback/{qos}");
+        let broker = broker();
+        retained_by_a_client(&broker, &topic, qos).await;
+        let client = connected(&broker, connect_options("retained-suback", true, 0)).await;
+        let frames = first_frames_after_subscribing(&client, &topic, qos).await;
+        let first_bytes: Vec<u8> = frames.iter().map(|(first_byte, _)| *first_byte).collect();
+        assert_eq!(first_bytes, [0x90, 0x31 | (qos << 1)]);
+        assert_eq!(frames[0].1, [0x00, 0x01, 0x00, qos]);
+        assert_ne!(publish_packet_id(&frames[1].1), [0, 0]);
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_subscribe_matching_a_retained_qos_1_message_gets_its_suback() {
+        retained_delivery_after_the_suback(1).await;
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_subscribe_matching_a_retained_qos_2_message_gets_its_suback() {
+        retained_delivery_after_the_suback(2).await;
+    }
+
+    async fn live_deliveries_after_a_retained_qos_1(acknowledge: bool) -> usize {
+        let broker = broker();
+        retained_by_a_client(&broker, "kept/ack", 1).await;
+        let client = connected(
+            &broker,
+            connect_options("retained-ack", true, 0).with_receive_maximum(1),
+        )
+        .await;
+        let frames = first_frames_after_subscribing(&client, "kept/ack", 1).await;
+        let first_bytes: Vec<u8> = frames.iter().map(|(first_byte, _)| *first_byte).collect();
+        assert_eq!(first_bytes, [0x90, 0x33]);
+        client.clear();
+        if acknowledge {
+            client.send_raw(&puback(&publish_packet_id(&frames[1].1)));
+        }
+        route(&broker, "kept/ack", b"live", QoS::AtLeastOnce).await;
+        for _ in 0..100 {
+            if !publish_frames(&client.received()).is_empty() {
+                break;
+            }
+            sleep(10).await;
+        }
+        publish_frames(&client.received()).len()
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_acknowledged_retained_qos_1_delivery_frees_the_receive_window() {
+        assert_eq!(live_deliveries_after_a_retained_qos_1(true).await, 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn control_an_unacknowledged_retained_qos_1_delivery_holds_the_receive_window() {
+        assert_eq!(live_deliveries_after_a_retained_qos_1(false).await, 0);
+    }
+
     async fn delivered_at_qos_1_then_resumed(acknowledge: bool) -> Vec<(u8, Vec<u8>)> {
         let broker = broker();
         let first = connected(&broker, connect_options("resend-1", true, 3600)).await;
