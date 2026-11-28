@@ -6,17 +6,23 @@ use mqtt5::broker::auth_mechanisms::{
 use mqtt5::broker::config::{StorageBackend, StorageConfig};
 use mqtt5::broker::{BrokerConfig, MqttBroker};
 use mqtt5::client::{AuthHandler, AuthResponse, ScramSha256AuthHandler};
+use mqtt5::error::MqttError;
 use mqtt5::packet::auth::AuthPacket;
+use mqtt5::packet::connack::ConnAckPacket;
 use mqtt5::packet::connect::ConnectPacket;
 use mqtt5::packet::{MqttPacket, Packet};
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
 use mqtt5::transport::packet_io::read_packet_from_stream;
 use mqtt5::types::ConnectOptions;
+use mqtt5::MqttClient;
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 
 const METHOD: &str = "SCRAM-SHA-256";
 const USERNAME: &str = "alice";
@@ -33,6 +39,12 @@ fn password() -> String {
     format!("{:x}", run_nonce())
 }
 const EMPTY_AUTH: [u8; 2] = [0xF0, 0x00];
+const CONTINUE_AUTH_WITHOUT_METHOD: [u8; 4] = [0xF0, 0x02, 0x18, 0x00];
+const REAUTH_WITHOUT_METHOD: [u8; 4] = [0xF0, 0x02, 0x19, 0x00];
+const REAUTH_WITH_METHOD: [u8; 20] = [
+    0xF0, 0x12, 0x19, 0x10, 0x15, 0x00, 0x0D, b'S', b'C', b'R', b'A', b'M', b'-', b'S', b'H', b'A',
+    b'-', b'2', b'5', b'6',
+];
 
 struct SingleUserStore {
     credentials: ScramCredentials,
@@ -399,5 +411,363 @@ async fn other_method_after_scram_connack_is_answered_with_disconnect_protocol_e
         &packets,
         ReasonCode::ProtocolError,
         "[MQTT-4.12.1-1] [MQTT-3.14.2-1]",
+    );
+}
+
+#[tokio::test]
+async fn reauthenticate_without_method_after_scram_connack_is_answered_with_disconnect_protocol_error(
+) {
+    let (addr, broker) = start_broker(true).await;
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
+    let mut wire = connect_scram(addr, "scram-reauth-no-method", &handler).await;
+    wire.send_raw(&REAUTH_WITHOUT_METHOD).await;
+    let packets = wire.packets_until_closed().await;
+    broker.abort();
+    assert_only_disconnect(
+        &packets,
+        ReasonCode::ProtocolError,
+        "[MQTT-4.12.1-1] [MQTT-4.13.1-1]",
+    );
+}
+
+#[tokio::test]
+async fn continue_without_method_after_scram_connack_is_answered_with_disconnect_protocol_error() {
+    let (addr, broker) = start_broker(true).await;
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
+    let mut wire = connect_scram(addr, "scram-continue-no-method", &handler).await;
+    wire.send_raw(&CONTINUE_AUTH_WITHOUT_METHOD).await;
+    let packets = wire.packets_until_closed().await;
+    broker.abort();
+    assert_only_disconnect(
+        &packets,
+        ReasonCode::ProtocolError,
+        "[MQTT-4.12.0-5] [MQTT-4.13.1-1]",
+    );
+}
+
+#[tokio::test]
+async fn reauthenticate_without_method_on_plain_connection_is_answered_with_disconnect_protocol_error(
+) {
+    let (addr, broker) = start_broker(false).await;
+    let mut wire = connect_plain(addr, "plain-reauth-no-method").await;
+    wire.send_raw(&REAUTH_WITHOUT_METHOD).await;
+    let packets = wire.packets_until_closed().await;
+    broker.abort();
+    assert_only_disconnect(
+        &packets,
+        ReasonCode::ProtocolError,
+        "[MQTT-4.12.0-7] [MQTT-4.13.1-1]",
+    );
+}
+
+#[tokio::test]
+async fn reauthenticate_without_method_before_connack_is_refused_with_connack_protocol_error() {
+    let (addr, broker) = start_broker(true).await;
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
+    let (mut wire, _) = send_scram_connect(addr, "scram-early-reauth-no-method", &handler).await;
+    wire.send_raw(&REAUTH_WITHOUT_METHOD).await;
+    let packets = wire.packets_until_closed().await;
+    broker.abort();
+    assert_only_connack(
+        &packets,
+        ReasonCode::ProtocolError,
+        "[MQTT-4.12.0-5] [MQTT-3.14.0-1]",
+    );
+}
+
+#[tokio::test]
+async fn continue_without_method_before_connack_is_refused_with_connack_protocol_error() {
+    let (addr, broker) = start_broker(true).await;
+    let handler = ScramSha256AuthHandler::new(USERNAME, password());
+    let (mut wire, _) = send_scram_connect(addr, "scram-early-continue-no-method", &handler).await;
+    wire.send_raw(&CONTINUE_AUTH_WITHOUT_METHOD).await;
+    let packets = wire.packets_until_closed().await;
+    broker.abort();
+    assert_only_connack(
+        &packets,
+        ReasonCode::ProtocolError,
+        "[MQTT-4.12.0-5] [MQTT-3.14.0-1]",
+    );
+}
+
+struct CountingAuthHandler {
+    challenges: Arc<AtomicUsize>,
+}
+
+impl AuthHandler for CountingAuthHandler {
+    fn handle_challenge<'a>(
+        &'a self,
+        auth_method: &'a str,
+        challenge_data: Option<&'a [u8]>,
+    ) -> Pin<Box<dyn Future<Output = mqtt5::error::Result<AuthResponse>> + Send + 'a>> {
+        self.challenges.fetch_add(1, Ordering::SeqCst);
+        let reply = [auth_method.as_bytes(), challenge_data.unwrap_or_default()].concat();
+        Box::pin(async move { Ok(AuthResponse::Continue(reply)) })
+    }
+}
+
+#[tokio::test]
+async fn client_refuses_continue_without_method_before_connack() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut wire = Wire {
+            stream,
+            buffer: bytes::BytesMut::new(),
+        };
+        match wire.next().await {
+            Some(Packet::Connect(_)) => {}
+            other => panic!("expected CONNECT, got {other:?}"),
+        }
+        wire.send_raw(&CONTINUE_AUTH_WITHOUT_METHOD).await;
+        wire.next().await
+    });
+    let challenges = Arc::new(AtomicUsize::new(0));
+    let client = MqttClient::with_options(
+        ConnectOptions::new("client-continue-no-method").with_authentication_method(METHOD),
+    );
+    client
+        .set_auth_handler(CountingAuthHandler {
+            challenges: Arc::clone(&challenges),
+        })
+        .await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect(&format!("mqtt://{addr}")),
+    )
+    .await
+    .unwrap();
+    let answer = server.await.unwrap();
+    assert!(
+        matches!(result, Err(MqttError::ProtocolError(_))),
+        "[MQTT-4.12.0-5]: connect must fail with a protocol error, got {result:?}"
+    );
+    assert_eq!(
+        challenges.load(Ordering::SeqCst),
+        0,
+        "[MQTT-4.12.0-5]: the auth handler must not see an AUTH without a method"
+    );
+    assert!(
+        !matches!(answer, Some(Packet::Auth(_))),
+        "[MQTT-4.12.0-5]: the client must not answer an AUTH without a method, sent {answer:?}"
+    );
+}
+
+#[tokio::test]
+async fn client_does_not_answer_continue_without_method_after_connack() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut wire = Wire {
+            stream,
+            buffer: bytes::BytesMut::new(),
+        };
+        match wire.next().await {
+            Some(Packet::Connect(_)) => {}
+            other => panic!("expected CONNECT, got {other:?}"),
+        }
+        let mut connack = ConnAckPacket::new(false, ReasonCode::Success);
+        connack
+            .properties
+            .set_authentication_method(METHOD.to_string());
+        wire.send(&connack).await;
+        wire.send_raw(&CONTINUE_AUTH_WITHOUT_METHOD).await;
+        wire.next().await
+    });
+    let challenges = Arc::new(AtomicUsize::new(0));
+    let client = MqttClient::with_options(
+        ConnectOptions::new("client-late-continue-no-method").with_authentication_method(METHOD),
+    );
+    client
+        .set_auth_handler(CountingAuthHandler {
+            challenges: Arc::clone(&challenges),
+        })
+        .await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect(&format!("mqtt://{addr}")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let answer = server.await.unwrap();
+    assert_eq!(
+        challenges.load(Ordering::SeqCst),
+        0,
+        "[MQTT-4.12.0-5]: the auth handler must not see an AUTH without a method"
+    );
+    assert!(
+        !matches!(answer, Some(Packet::Auth(_))),
+        "[MQTT-4.12.0-5]: the client must not answer an AUTH without a method, sent {answer:?}"
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Handler {
+    Counting,
+    Missing,
+}
+
+async fn client_answer_to_server_auth_after_connack(
+    auth: &'static [u8],
+    handler: Handler,
+) -> Option<Packet> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut wire = Wire {
+            stream,
+            buffer: bytes::BytesMut::new(),
+        };
+        match wire.next().await {
+            Some(Packet::Connect(_)) => {}
+            other => panic!("expected CONNECT, got {other:?}"),
+        }
+        let mut connack = ConnAckPacket::new(false, ReasonCode::Success);
+        connack
+            .properties
+            .set_authentication_method(METHOD.to_string());
+        wire.send(&connack).await;
+        wire.send_raw(auth).await;
+        wire.next().await
+    });
+    let challenges = Arc::new(AtomicUsize::new(0));
+    let client = MqttClient::with_options(
+        ConnectOptions::new("server-reauthenticate-after-connack")
+            .with_authentication_method(METHOD),
+    );
+    if handler == Handler::Counting {
+        client
+            .set_auth_handler(CountingAuthHandler {
+                challenges: Arc::clone(&challenges),
+            })
+            .await;
+    }
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect(&format!("mqtt://{addr}")),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let answer = server.await.unwrap();
+    assert_eq!(
+        challenges.load(Ordering::SeqCst),
+        0,
+        "the auth handler was called"
+    );
+    answer
+}
+
+async fn connect_after_server_auth_before_connack(
+    auth: &'static [u8],
+    handler: Handler,
+) -> mqtt5::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut wire = Wire {
+            stream,
+            buffer: bytes::BytesMut::new(),
+        };
+        match wire.next().await {
+            Some(Packet::Connect(_)) => {}
+            other => panic!("expected CONNECT, got {other:?}"),
+        }
+        wire.send_raw(auth).await;
+        wire.next().await
+    });
+    let challenges = Arc::new(AtomicUsize::new(0));
+    let client = MqttClient::with_options(
+        ConnectOptions::new("server-reauthenticate-before-connack")
+            .with_authentication_method(METHOD),
+    );
+    if handler == Handler::Counting {
+        client
+            .set_auth_handler(CountingAuthHandler {
+                challenges: Arc::clone(&challenges),
+            })
+            .await;
+    }
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.connect(&format!("mqtt://{addr}")),
+    )
+    .await
+    .unwrap();
+    server.abort();
+    assert_eq!(
+        challenges.load(Ordering::SeqCst),
+        0,
+        "the auth handler was called"
+    );
+    result
+}
+
+fn assert_protocol_error_disconnect(answer: Option<Packet>) {
+    match answer {
+        Some(Packet::Disconnect(disconnect)) => assert_eq!(
+            disconnect.reason_code,
+            ReasonCode::ProtocolError,
+            "the client must answer with DISCONNECT 0x82"
+        ),
+        other => panic!("expected DISCONNECT, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_client_answers_a_server_reauthenticate_without_a_method_with_protocol_error() {
+    let answer =
+        client_answer_to_server_auth_after_connack(&REAUTH_WITHOUT_METHOD, Handler::Counting).await;
+    assert_protocol_error_disconnect(answer);
+}
+
+#[tokio::test]
+async fn the_client_answers_a_server_reauthenticate_with_a_method_with_protocol_error() {
+    let answer =
+        client_answer_to_server_auth_after_connack(&REAUTH_WITH_METHOD, Handler::Counting).await;
+    assert_protocol_error_disconnect(answer);
+}
+
+#[tokio::test]
+async fn connect_fails_with_protocol_error_on_a_server_reauthenticate_without_a_method() {
+    let result =
+        connect_after_server_auth_before_connack(&REAUTH_WITHOUT_METHOD, Handler::Counting).await;
+    assert!(
+        matches!(result, Err(MqttError::ProtocolError(_))),
+        "connect returned {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn connect_fails_with_protocol_error_on_a_server_reauthenticate_with_a_method() {
+    let result =
+        connect_after_server_auth_before_connack(&REAUTH_WITH_METHOD, Handler::Counting).await;
+    assert!(
+        matches!(result, Err(MqttError::ProtocolError(_))),
+        "connect returned {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_client_without_an_auth_handler_answers_continue_without_a_method_with_protocol_error() {
+    let answer =
+        client_answer_to_server_auth_after_connack(&CONTINUE_AUTH_WITHOUT_METHOD, Handler::Missing)
+            .await;
+    assert_protocol_error_disconnect(answer);
+}
+
+#[tokio::test]
+async fn connect_without_an_auth_handler_fails_with_protocol_error_on_continue_without_a_method() {
+    let result =
+        connect_after_server_auth_before_connack(&CONTINUE_AUTH_WITHOUT_METHOD, Handler::Missing)
+            .await;
+    assert!(
+        matches!(result, Err(MqttError::ProtocolError(_))),
+        "connect returned {result:?}"
     );
 }
