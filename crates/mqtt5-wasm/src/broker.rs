@@ -1088,7 +1088,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap()
-            .subscriptions[topic_filter]
+            .subscription(topic_filter, None)
+            .unwrap()
             .instance
     }
 
@@ -1165,7 +1166,7 @@ mod tests {
             "a displaced connection's SUBSCRIBE installed a route for the successor"
         );
         let stored = broker.storage.get_session("dsub").await.unwrap().unwrap();
-        assert!(!stored.subscriptions.contains_key("dsub/t"));
+        assert!(stored.subscription("dsub/t", None).is_none());
     }
 
     #[wasm_bindgen_test]
@@ -1188,7 +1189,7 @@ mod tests {
             "a displaced connection's UNSUBSCRIBE removed the successor's route"
         );
         let stored = broker.storage.get_session("dunsub").await.unwrap().unwrap();
-        assert!(stored.subscriptions.contains_key("keep/x"));
+        assert!(stored.subscription("keep/x", None).is_some());
     }
 
     #[wasm_bindgen_test]
@@ -1216,7 +1217,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!stored.subscriptions.contains_key("secret/x"));
+        assert!(stored.subscription("secret/x", None).is_none());
     }
 
     #[wasm_bindgen_test]
@@ -1333,8 +1334,8 @@ mod tests {
         client.send_raw(&pipelined);
         sleep(500).await;
         let stored = broker.storage.get_session("rw1").await.unwrap().unwrap();
-        assert!(!stored.subscriptions.contains_key("secret/#"));
-        assert!(stored.subscriptions.contains_key("secret/x"));
+        assert!(stored.subscription("secret/#", None).is_none());
+        assert!(stored.subscription("secret/x", None).is_some());
         let received = client.received();
         let mut rest = received.as_slice();
         let mut types = Vec::new();

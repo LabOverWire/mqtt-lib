@@ -155,10 +155,9 @@ impl WasmClientHandler {
     }
 
     fn subscription_instance(&self, topic_filter: &str) -> u64 {
-        self.session
-            .borrow()
-            .as_ref()
-            .map_or(0, |session| session.subscription_instance(topic_filter))
+        self.session.borrow().as_ref().map_or(0, |session| {
+            session.subscription_instance(topic_filter, None)
+        })
     }
 
     fn is_change_only_filter(&self, topic_filter: &str) -> bool {
@@ -304,11 +303,11 @@ impl WasmClientHandler {
 
             if removed {
                 if let Some(session) = self.session.borrow_mut().as_mut() {
-                    session.remove_subscription(filter);
+                    session.remove_subscription(filter, None);
                 }
                 let topic_filter = filter.clone();
                 self.update_stored_session(move |session| {
-                    session.remove_subscription(&topic_filter);
+                    session.remove_subscription(&topic_filter, None);
                 })
                 .await?;
             }

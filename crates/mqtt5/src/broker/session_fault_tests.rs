@@ -249,10 +249,10 @@ async fn failed_subscribe_write_is_not_acknowledged_and_installs_no_route() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!stored.subscriptions.contains_key("lost/a"));
-    assert!(!stored.subscriptions.contains_key("lost/b"));
+    assert!(stored.subscription("lost/a", None).is_none());
+    assert!(stored.subscription("lost/b", None).is_none());
     assert_eq!(
-        stored.subscriptions.get("kept/t").map(|sub| sub.qos),
+        stored.subscription("kept/t", None).map(|sub| sub.qos),
         Some(QoS::AtLeastOnce),
         "the failed SUBSCRIBE changed a stored subscription"
     );
@@ -286,7 +286,7 @@ async fn failed_unsubscribe_write_is_not_acknowledged_and_keeps_the_route() {
         .await
         .unwrap()
         .unwrap();
-    assert!(stored.subscriptions.contains_key("kept/u"));
+    assert!(stored.subscription("kept/u", None).is_some());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
