@@ -97,7 +97,9 @@ impl AuthRateLimiter {
         success: bool,
     ) {
         self.prune_if_due();
-        self.record_entry(&self.ip_entries, addr, success);
+        if !success {
+            self.record_entry(&self.ip_entries, addr, false);
+        }
         if let Some(name) = username {
             self.record_entry(&self.username_entries, name.to_string(), success);
         }
@@ -204,10 +206,8 @@ impl RateLimitedAuthProvider {
                 ));
             }
             let result = exchange().await?;
-            match result.status {
-                EnhancedAuthStatus::Success => self.rate_limiter.record_attempt(ip, true),
-                EnhancedAuthStatus::Failed => self.rate_limiter.record_attempt(ip, false),
-                EnhancedAuthStatus::Continue => {}
+            if result.status == EnhancedAuthStatus::Failed {
+                self.rate_limiter.record_attempt(ip, false);
             }
             Ok(result)
         })

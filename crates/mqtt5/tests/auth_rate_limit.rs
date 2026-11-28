@@ -221,7 +221,18 @@ async fn configured_provider_reinstalled_in_a_composite_counts_each_failure_once
         "{} failures are under the limit of {MAX_ATTEMPTS}",
         MAX_ATTEMPTS - 1
     );
-    assert_password_failures_lock_out(addr).await;
+    let last = password_connack(addr, "bad-last", &wrong_secret()).await;
+    assert_ne!(last, ReasonCode::Success, "a wrong password");
+    assert_ne!(
+        last,
+        ReasonCode::ConnectionRateExceeded,
+        "failure {MAX_ATTEMPTS} is within the limit"
+    );
+    assert_eq!(
+        password_connack(addr, "good-over-limit", &secret()).await,
+        ReasonCode::ConnectionRateExceeded,
+        "a login after {MAX_ATTEMPTS} failures from the same address must be rate limited"
+    );
     handle.abort();
 }
 
@@ -393,4 +404,27 @@ async fn reauthentication_failures_are_rate_limited() {
     }
     assert_challenge_connect_is_rate_limited(addr).await;
     broker.abort();
+}
+
+#[tokio::test]
+async fn enhanced_auth_limit_survives_a_successful_login() {
+    let (addr, broker) = start_with(Arc::new(ChallengeProvider)).await;
+    for attempt in 1..MAX_ATTEMPTS {
+        let (wire, code) =
+            connect_with_challenge(addr, &format!("bad-{attempt}"), &wrong_secret()).await;
+        drop(wire);
+        assert_eq!(code, ReasonCode::NotAuthorized, "failure {attempt}");
+    }
+    let session = connected(addr, "good-under-limit").await;
+    drop(session);
+    let (wire, code) = connect_with_challenge(addr, "bad-last", &wrong_secret()).await;
+    drop(wire);
+    assert_eq!(code, ReasonCode::NotAuthorized, "failure {MAX_ATTEMPTS}");
+    let (wire, reply) = send_challenge_connect(addr, "over-limit").await;
+    drop(wire);
+    broker.abort();
+    assert!(
+        matches!(reply, Some(Packet::ConnAck(ref connack)) if connack.reason_code == ReasonCode::ConnectionRateExceeded),
+        "a connect after {MAX_ATTEMPTS} failed exchanges from one address must be rate limited, got {reply:?}"
+    );
 }
