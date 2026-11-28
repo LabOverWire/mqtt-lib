@@ -329,12 +329,15 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
                     "AUTH received but CONNECT carried no Authentication Method".to_string(),
                 )
             })?;
+            let Some(auth_method) = auth.authentication_method() else {
+                return Err(MqttError::ProtocolError(
+                    "AUTH 0x18 without an Authentication Method".to_string(),
+                ));
+            };
             let handler = ctx
                 .auth_handler
                 .as_ref()
                 .ok_or(MqttError::AuthenticationFailed)?;
-
-            let auth_method = auth.authentication_method().unwrap_or("");
             let auth_data = auth.authentication_data();
 
             let response = handler.handle_challenge(auth_method, auth_data).await?;
@@ -352,6 +355,11 @@ async fn handle_auth_packet(auth: AuthPacket, ctx: &PacketReaderContext) -> Resu
                     return Err(MqttError::AuthenticationFailed);
                 }
             }
+        }
+        ReasonCode::ReAuthenticate => {
+            return Err(MqttError::ProtocolError(
+                "server sent AUTH with reason code Re-authenticate (0x19)".to_string(),
+            ));
         }
         ReasonCode::Success => {
             tracing::info!("CLIENT: Re-authentication completed successfully");

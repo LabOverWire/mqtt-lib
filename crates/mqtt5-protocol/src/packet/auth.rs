@@ -44,13 +44,11 @@ impl AuthPacket {
     ) -> Result<Self> {
         let mut properties = Properties::default();
 
-        // Authentication method is required
         properties.add(
             crate::protocol::v5::properties::PropertyId::AuthenticationMethod,
             crate::protocol::v5::properties::PropertyValue::Utf8String(auth_method),
         )?;
 
-        // Authentication data is optional
         if let Some(data) = auth_data {
             properties.add(
                 crate::protocol::v5::properties::PropertyId::AuthenticationData,
@@ -72,13 +70,11 @@ impl AuthPacket {
     pub fn re_authenticate(auth_method: String, auth_data: Option<Vec<u8>>) -> Result<Self> {
         let mut properties = Properties::default();
 
-        // Authentication method is required
         properties.add(
             crate::protocol::v5::properties::PropertyId::AuthenticationMethod,
             crate::protocol::v5::properties::PropertyValue::Utf8String(auth_method),
         )?;
 
-        // Authentication data is optional
         if let Some(data) = auth_data {
             properties.add(
                 crate::protocol::v5::properties::PropertyId::AuthenticationData,
@@ -177,7 +173,6 @@ impl AuthPacket {
     ///
     /// Returns an error if the operation fails
     pub fn validate(&self) -> Result<()> {
-        // For AUTH packets, authentication method is required for Continue and ReAuth
         if self.authentication_method().is_none()
             && (self.reason_code == ReasonCode::ContinueAuthentication
                 || self.reason_code == ReasonCode::ReAuthenticate)
@@ -199,17 +194,12 @@ impl MqttPacket for AuthPacket {
     fn encode_body<B: BufMut>(&self, buf: &mut B) -> Result<()> {
         self.validate()?;
 
-        // For AUTH packets, if reason code is Success and properties are empty,
-        // we can encode as an empty packet (remaining length = 0)
         if self.reason_code == ReasonCode::Success && self.properties.is_empty() {
-            // Empty packet, nothing to encode
             return Ok(());
         }
 
-        // Encode reason code
         buf.put_u8(u8::from(self.reason_code));
 
-        // Encode properties
         self.properties.encode(buf)?;
 
         Ok(())
@@ -217,11 +207,9 @@ impl MqttPacket for AuthPacket {
 
     fn decode_body<B: Buf>(buf: &mut B, fixed_header: &FixedHeader) -> Result<Self> {
         if fixed_header.remaining_length == 0 {
-            // Empty AUTH packet defaults to Success with no properties
             return Ok(Self::new(ReasonCode::Success));
         }
 
-        // Decode reason code
         if !buf.has_remaining() {
             return Err(MqttError::MalformedPacket(
                 "Missing reason code in AUTH packet".to_string(),
@@ -232,20 +220,16 @@ impl MqttPacket for AuthPacket {
         let reason_code = ReasonCode::from_u8(reason_code_val)
             .ok_or(MqttError::InvalidReasonCode(reason_code_val))?;
 
-        // Decode properties (if remaining length > 1)
         let properties = if buf.has_remaining() {
             Properties::decode(buf)?
         } else {
             Properties::default()
         };
 
-        let packet = Self {
+        Ok(Self {
             reason_code,
             properties,
-        };
-
-        packet.validate()?;
-        Ok(packet)
+        })
     }
 }
 
@@ -320,7 +304,6 @@ mod tests {
 
         packet.encode(&mut buf).unwrap();
 
-        // Decode the complete packet (including fixed header)
         let fixed_header = FixedHeader::decode(&mut buf).unwrap();
         let decoded = AuthPacket::decode_body(&mut buf, &fixed_header).unwrap();
 
@@ -371,15 +354,32 @@ mod tests {
     #[test]
     fn test_auth_packet_validation_missing_auth_method() {
         let packet = AuthPacket::new(ReasonCode::ContinueAuthentication);
-        // Packet without authentication method should be invalid
         let result = packet.validate();
         assert!(result.is_err());
     }
 
     #[test]
+    fn test_auth_packet_decode_leaves_missing_auth_method_to_the_receiver() {
+        for reason_code in [
+            ReasonCode::ContinueAuthentication,
+            ReasonCode::ReAuthenticate,
+        ] {
+            let mut buf = BytesMut::new();
+            buf.put_u8(u8::from(reason_code));
+            buf.put_u8(0x00);
+
+            let decoded =
+                AuthPacket::decode_body(&mut buf, &FixedHeader::new(PacketType::Auth, 0, 2))
+                    .unwrap();
+            assert_eq!(decoded.reason_code, reason_code);
+            assert!(decoded.authentication_method().is_none());
+            assert!(decoded.validate().is_err());
+        }
+    }
+
+    #[test]
     fn test_auth_packet_decode_malformed() {
         let mut buf = BytesMut::new();
-        // Empty buffer should fail for packets with remaining length > 0
 
         let result = AuthPacket::decode_body(&mut buf, &FixedHeader::new(PacketType::Auth, 0, 1));
         assert!(result.is_err());
@@ -388,8 +388,8 @@ mod tests {
     #[test]
     fn test_auth_packet_decode_invalid_reason_code() {
         let mut buf = BytesMut::new();
-        buf.put_u8(0xFF); // Invalid reason code
-        buf.put_u8(0x00); // Empty properties
+        buf.put_u8(0xFF);
+        buf.put_u8(0x00);
 
         let result = AuthPacket::decode_body(&mut buf, &FixedHeader::new(PacketType::Auth, 0, 2));
         assert!(result.is_err());
