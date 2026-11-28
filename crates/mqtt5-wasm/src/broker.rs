@@ -1008,6 +1008,16 @@ mod tests {
             self.inbox.borrow().clone()
         }
 
+        async fn wait_for_deliveries(&self, count: usize) -> Vec<(char, bool, Vec<u8>)> {
+            for _ in 0..300 {
+                if deliveries(&self.received()).len() >= count {
+                    break;
+                }
+                sleep(10).await;
+            }
+            deliveries(&self.received())
+        }
+
         fn received(&self) -> Vec<u8> {
             self.inbox.borrow().clone()
         }
@@ -2643,6 +2653,63 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    async fn another_auth_method_after_connack_gets_disconnect_protocol_error() {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "repro-method").await;
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("Y".to_string());
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(
+            reply
+                .first()
+                .map(|(first_byte, body)| (*first_byte, body.clone())),
+            Some((0xE0, vec![0x82])),
+            "[MQTT-3.14.2-1] expected DISCONNECT 0x82, got {reply:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn reauthentication_started_again_during_one_starts_over() {
+        let broker = broker();
+        let client = authenticated_as_alice(&broker, "repro-restart").await;
+        let mut auth = AuthPacket::new(ReasonCode::ReAuthenticate);
+        auth.properties.set_authentication_method("X".to_string());
+        client.send(&auth);
+        assert_eq!(client.wait_for(1).await.first(), Some(&0xF0));
+        client.clear();
+        client.send(&auth);
+        sleep(100).await;
+        let reply = frames(&client.received());
+        assert_eq!(
+            reply
+                .first()
+                .map(|(first_byte, body)| (*first_byte, body.first().copied())),
+            Some((0xF0, Some(0x18))),
+            "[MQTT-4.12.1-1] expected AUTH 0x18 starting a new exchange, got {reply:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn auth_on_a_v311_connection_closes_it_without_a_disconnect() {
+        let broker = broker();
+        let client = open_with(&broker, Arc::new(Reauth));
+        client.send_raw(&v4_connect("v4-auth"));
+        assert_eq!(client.wait_for(4).await.first(), Some(&0x20));
+        client.clear();
+        client.send_raw(&[0xF0, 0x00]);
+        sleep(100).await;
+        client.send_raw(&[0xC0, 0x00]);
+        sleep(100).await;
+        assert!(
+            client.received().is_empty(),
+            "[MQTT-3.14.0-1] v3.1.1 got {:?}",
+            client.received()
+        );
+    }
+
+    #[wasm_bindgen_test]
     async fn resend_keeps_send_order_across_packet_identifier_wrap() {
         use mqtt5::broker::storage::{InflightDirection, InflightMessage, InflightPhase};
         while js_sys::Date::now() % 1000.0 > 100.0 {
@@ -2983,6 +3050,15 @@ mod tests {
         );
     }
 
+    fn disconnect_count(broker: &WasmBroker) -> Rc<std::cell::Cell<u32>> {
+        let count = Rc::new(std::cell::Cell::new(0));
+        let counter = Rc::clone(&count);
+        let callback =
+            Closure::<dyn FnMut(JsValue)>::new(move |_: JsValue| counter.set(counter.get() + 1));
+        broker.on_client_disconnect(callback.into_js_value().unchecked_into());
+        count
+    }
+
     fn deliveries(bytes: &[u8]) -> Vec<(char, bool, Vec<u8>)> {
         publish_frames(bytes)
             .iter()
@@ -3042,10 +3118,17 @@ mod tests {
             .iter()
             .map(|(_, body)| publish_packet_id(body))
             .collect();
+        let disconnects = disconnect_count(&broker);
         let second = connected(&broker, connect_options("ended", false, 3600)).await;
         sleep(100).await;
+        let before_close = disconnects.get();
         second.port.close();
-        sleep(300).await;
+        for _ in 0..300 {
+            if disconnects.get() > before_close {
+                break;
+            }
+            sleep(10).await;
+        }
         gate.add_permits(100);
         sleep(300).await;
         let mut stored: Vec<u16> = broker
@@ -3058,8 +3141,7 @@ mod tests {
             .collect();
         stored.sort_unstable();
         let third = start_connect(&broker, connect_options("ended", false, 3600));
-        sleep(300).await;
-        let on_third = deliveries(&third.received());
+        let on_third = third.wait_for_deliveries(3).await;
         drop(first);
         assert_eq!(
             (stored, on_third),

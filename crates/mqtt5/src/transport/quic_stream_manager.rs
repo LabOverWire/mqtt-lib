@@ -1,38 +1,53 @@
+use crate::client::{Flush, RoomReservation, UnifiedWriter};
 use crate::error::{MqttError, Result};
 use crate::transport::client_config::StreamStrategy;
 use crate::transport::flow::{DataFlowHeader, FlowFlags, FlowId, FlowIdGenerator};
-use crate::transport::packet_io::encode_packet_to_buffer;
 use bytes::BytesMut;
 use mqtt5_protocol::packet::Packet;
+use parking_lot::Mutex;
 use quinn::{Connection, SendStream};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Notify, Semaphore};
 use tracing::{debug, instrument, trace, warn};
 
+type SharedWriter = Arc<UnifiedWriter>;
+
 struct StreamInfo {
-    stream: Mutex<SendStream>,
+    stream: SharedWriter,
     flow_id: FlowId,
-    last_used: std::sync::Mutex<Instant>,
+    last_used: Mutex<Instant>,
+    reserved: AtomicUsize,
+}
+
+impl StreamInfo {
+    fn evictable(&self) -> bool {
+        self.reserved.load(Ordering::Acquire) == 0 && self.stream.try_finish_idle()
+    }
 }
 
 struct FlowStreamInfo {
-    stream: SendStream,
+    stream: SharedWriter,
     last_used: Instant,
 }
 
 const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const DEFAULT_MAX_CACHED_STREAMS: usize = 100;
 const DEFAULT_FLOW_EXPIRE_INTERVAL: u64 = 300;
 
 pub struct QuicStreamManager {
     connection: Arc<Connection>,
     strategy: StreamStrategy,
-    topic_streams: Arc<Mutex<HashMap<String, Arc<StreamInfo>>>>,
-    flow_streams: Arc<Mutex<HashMap<FlowId, FlowStreamInfo>>>,
+    topic_streams: Mutex<HashMap<String, Arc<StreamInfo>>>,
+    flow_streams: Mutex<HashMap<FlowId, FlowStreamInfo>>,
     max_cached_streams: usize,
     stream_idle_timeout: Duration,
-    flow_id_generator: Arc<Mutex<FlowIdGenerator>>,
+    drained: Arc<Notify>,
+    dedicated_slots: Arc<Semaphore>,
+    closed: AtomicBool,
+    flow_id_generator: Mutex<FlowIdGenerator>,
     flow_expire_interval: u64,
     flow_flags: FlowFlags,
     enable_flow_headers: bool,
@@ -44,11 +59,14 @@ impl QuicStreamManager {
         Self {
             connection,
             strategy,
-            topic_streams: Arc::new(Mutex::new(HashMap::new())),
-            flow_streams: Arc::new(Mutex::new(HashMap::new())),
-            max_cached_streams: 100,
+            topic_streams: Mutex::new(HashMap::new()),
+            flow_streams: Mutex::new(HashMap::new()),
+            max_cached_streams: DEFAULT_MAX_CACHED_STREAMS,
             stream_idle_timeout: DEFAULT_STREAM_IDLE_TIMEOUT,
-            flow_id_generator: Arc::new(Mutex::new(FlowIdGenerator::new())),
+            drained: Arc::new(Notify::new()),
+            dedicated_slots: Arc::new(Semaphore::new(DEFAULT_MAX_CACHED_STREAMS)),
+            closed: AtomicBool::new(false),
+            flow_id_generator: Mutex::new(FlowIdGenerator::new()),
             flow_expire_interval: DEFAULT_FLOW_EXPIRE_INTERVAL,
             flow_flags: FlowFlags::default(),
             enable_flow_headers: false,
@@ -88,28 +106,13 @@ impl QuicStreamManager {
     #[instrument(skip(self), fields(strategy = ?self.strategy), level = "debug")]
     pub async fn open_data_stream_with_flow(&self) -> Result<(quinn::SendStream, FlowId)> {
         let mut send = self.open_data_stream().await?;
-
-        let flow_id = if self.enable_flow_headers {
-            let flow_id = {
-                let mut gen = self.flow_id_generator.lock().await;
-                gen.next_client()
-            };
-
-            let mut buf = BytesMut::with_capacity(32);
-            let header =
-                DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags);
-            header.encode(&mut buf);
-
-            send.write_all(&buf).await.map_err(|e| {
+        let flow_id = self.next_flow_id();
+        if let Some(header) = self.flow_header(flow_id) {
+            send.write_all(&header).await.map_err(|e| {
                 MqttError::ConnectionError(format!("Failed to write flow header: {e}"))
             })?;
-
             debug!(flow_id = ?flow_id, "Wrote client data flow header on new stream");
-            flow_id
-        } else {
-            FlowId::client(0)
-        };
-
+        }
         Ok((send, flow_id))
     }
 
@@ -150,33 +153,44 @@ impl QuicStreamManager {
         self.flow_flags
     }
 
+    fn next_flow_id(&self) -> FlowId {
+        if self.enable_flow_headers {
+            self.flow_id_generator.lock().next_client()
+        } else {
+            FlowId::client(0)
+        }
+    }
+
+    fn flow_header(&self, flow_id: FlowId) -> Option<BytesMut> {
+        self.enable_flow_headers.then(|| {
+            let mut buf = BytesMut::with_capacity(32);
+            DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags)
+                .encode(&mut buf);
+            buf
+        })
+    }
+
+    fn unopened_stream(&self) -> (SharedWriter, FlowId) {
+        let flow_id = self.next_flow_id();
+        let writer = Arc::new(UnifiedWriter::quic_unopened(
+            Arc::clone(&self.connection),
+            Arc::clone(&self.drained),
+            self.flow_header(flow_id),
+        ));
+        (writer, flow_id)
+    }
+
     /// Sends a packet on a dedicated QUIC stream.
     ///
     /// # Errors
     /// Returns an error if the stream operation or packet encoding fails.
     #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_packet_on_stream(&self, packet: Packet) -> Result<()> {
-        let (mut send, flow_id) = self.open_data_stream_with_flow().await?;
-
-        let mut buf = BytesMut::with_capacity(1024);
-        encode_packet_to_buffer(&packet, &mut buf)?;
-
-        send.write_all(&buf)
+        self.prepare(&DataStream::Dedicated, packet_size(&packet))
+            .await?
+            .commit_then(&packet, || ())?
+            .send()
             .await
-            .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
-
-        send.finish()
-            .map_err(|e| MqttError::ConnectionError(format!("QUIC stream finish error: {e}")))?;
-
-        // Yield to allow QUIC I/O driver to transmit stream frames before returning.
-        // Without this, rapid sequential publishes can queue many streams faster than
-        // the I/O driver can transmit them, and a subsequent disconnect() may close
-        // the connection before all frames are sent.
-        tokio::task::yield_now().await;
-
-        debug!(flow_id = ?flow_id, "Sent packet on dedicated QUIC stream");
-
-        Ok(())
     }
 
     #[must_use]
@@ -189,82 +203,96 @@ impl QuicStreamManager {
         self.enable_flow_headers
     }
 
-    // [MQoQ§5.3] Per-topic stream caching
-    async fn get_or_create_topic_stream(&self, topic: &str) -> Result<Arc<StreamInfo>> {
-        let mut streams = self.topic_streams.lock().await;
-        let now = Instant::now();
-
-        let idle_topics: Vec<String> = streams
-            .iter()
-            .filter(|(_, info)| {
-                now.duration_since(info.last_used.lock().map_or(now, |used| *used))
-                    > self.stream_idle_timeout
-            })
-            .map(|(topic, _)| topic.clone())
-            .collect();
-
-        for idle_topic in &idle_topics {
-            if let Some(info) = streams.remove(idle_topic) {
-                let _ = info.stream.lock().await.finish();
-                debug!(topic = %idle_topic, flow_id = ?info.flow_id, "Closed idle stream");
+    pub(crate) async fn prepare(&self, target: &DataStream, size: usize) -> Result<PreparedStream> {
+        match target {
+            DataStream::Topic(topic) => {
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(MqttError::NotConnected);
+                }
+                let info = match self.reserve_topic_stream(topic) {
+                    Some(info) => info,
+                    None => self.reserve_when_drained(topic).await?,
+                };
+                let reservation = Reservation {
+                    info,
+                    drained: Arc::clone(&self.drained),
+                };
+                let room = reservation.info.stream.reserve_room(size).await;
+                Ok(PreparedStream::Topic(reservation, room))
+            }
+            DataStream::Dedicated => {
+                let slot = Arc::clone(&self.dedicated_slots)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| MqttError::NotConnected)?;
+                let (writer, flow_id) = self.unopened_stream();
+                writer.hold_slot(slot);
+                let room = writer.reserve_room(size).await;
+                Ok(PreparedStream::Dedicated(room, flow_id))
             }
         }
+    }
+
+    async fn reserve_when_drained(&self, topic: &str) -> Result<Arc<StreamInfo>> {
+        loop {
+            let drained = self.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            if self.closed.load(Ordering::Acquire) {
+                return Err(MqttError::NotConnected);
+            }
+            if let Some(info) = self.reserve_topic_stream(topic) {
+                return Ok(info);
+            }
+            trace!(topic = %topic, "Every cached topic stream is busy; waiting for one to drain");
+            drained.await;
+        }
+    }
+
+    fn reserve_topic_stream(&self, topic: &str) -> Option<Arc<StreamInfo>> {
+        let mut streams = self.topic_streams.lock();
+        let now = Instant::now();
+        streams.retain(|idle_topic, info| {
+            let idle = now.duration_since(*info.last_used.lock()) > self.stream_idle_timeout;
+            let closed = idle && info.evictable();
+            if closed {
+                debug!(topic = %idle_topic, flow_id = ?info.flow_id, "Closed idle stream");
+            }
+            !closed
+        });
 
         if let Some(info) = streams.get(topic) {
-            trace!(topic = %topic, flow_id = ?info.flow_id, "Reusing existing stream for topic");
-            return Ok(Arc::clone(info));
+            info.reserved.fetch_add(1, Ordering::AcqRel);
+            return Some(Arc::clone(info));
         }
 
         if streams.len() >= self.max_cached_streams {
-            let oldest = streams
+            let mut by_age: Vec<(Instant, String)> = streams
                 .iter()
-                .min_by_key(|(_, info)| info.last_used.lock().map_or(now, |used| *used))
-                .map(|(k, _)| k.clone());
-
-            if let Some(oldest_topic) = oldest {
-                if let Some(info) = streams.remove(&oldest_topic) {
-                    let _ = info.stream.lock().await.finish();
-                    debug!(
-                        topic = %oldest_topic,
-                        flow_id = ?info.flow_id,
-                        "Evicted oldest stream from cache (LRU)"
-                    );
-                }
-            }
+                .map(|(cached, info)| (*info.last_used.lock(), cached.clone()))
+                .collect();
+            by_age.sort();
+            let evicted = by_age.into_iter().find_map(|(_, cached)| {
+                streams
+                    .get(&cached)
+                    .filter(|info| info.evictable())
+                    .map(|_| cached)
+            });
+            let evicted = evicted?;
+            streams.remove(&evicted);
+            debug!(topic = %evicted, "Evicted oldest idle stream from cache (LRU)");
         }
+
         debug!(topic = %topic, "Opening new stream for topic");
-        let mut send = self.connection.open_uni().await.map_err(|e| {
-            MqttError::ConnectionError(format!("Failed to open QUIC stream for topic: {e}"))
-        })?;
-
-        let flow_id = if self.enable_flow_headers {
-            let flow_id = {
-                let mut gen = self.flow_id_generator.lock().await;
-                gen.next_client()
-            };
-
-            let mut buf = BytesMut::with_capacity(32);
-            let header =
-                DataFlowHeader::client(flow_id, self.flow_expire_interval, self.flow_flags);
-            header.encode(&mut buf);
-
-            send.write_all(&buf).await.map_err(|e| {
-                MqttError::ConnectionError(format!("Failed to write flow header: {e}"))
-            })?;
-
-            debug!(topic = %topic, flow_id = ?flow_id, "Wrote flow header for new topic stream");
-            flow_id
-        } else {
-            FlowId::client(0)
-        };
-
+        let (stream, flow_id) = self.unopened_stream();
         let info = Arc::new(StreamInfo {
-            stream: Mutex::new(send),
+            stream,
             flow_id,
-            last_used: std::sync::Mutex::new(Instant::now()),
+            last_used: Mutex::new(Instant::now()),
+            reserved: AtomicUsize::new(1),
         });
         streams.insert(topic.to_string(), Arc::clone(&info));
-        Ok(info)
+        Some(info)
     }
 
     /// Sends a packet on a topic-specific stream.
@@ -272,39 +300,26 @@ impl QuicStreamManager {
     /// # Errors
     /// Returns an error if the stream operation or packet encoding fails.
     pub async fn send_on_topic_stream(&self, topic: String, packet: Packet) -> Result<()> {
-        let info = self.get_or_create_topic_stream(&topic).await?;
-
-        let mut buf = BytesMut::with_capacity(1024);
-        encode_packet_to_buffer(&packet, &mut buf)?;
-
-        info.stream
-            .lock()
+        self.prepare(&DataStream::Topic(topic), packet_size(&packet))
+            .await?
+            .commit_then(&packet, || ())?
+            .send()
             .await
-            .write_all(&buf)
-            .await
-            .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
-
-        if let Ok(mut last_used) = info.last_used.lock() {
-            *last_used = Instant::now();
-        }
-
-        debug!(topic = %topic, flow_id = ?info.flow_id, "Sent packet on topic-specific stream");
-
-        Ok(())
     }
 
-    pub async fn get_flow_id_for_topic(&self, topic: &str) -> Option<FlowId> {
-        let streams = self.topic_streams.lock().await;
-        streams.get(topic).map(|info| info.flow_id)
+    pub fn get_flow_id_for_topic(&self, topic: &str) -> Option<FlowId> {
+        self.topic_streams
+            .lock()
+            .get(topic)
+            .map(|info| info.flow_id)
     }
 
     #[instrument(skip(self, stream), level = "debug")]
     pub async fn register_flow_stream(&self, flow_id: FlowId, stream: SendStream) {
-        let mut flows = self.flow_streams.lock().await;
-        flows.insert(
+        self.flow_streams.lock().insert(
             flow_id,
             FlowStreamInfo {
-                stream,
+                stream: Arc::new(UnifiedWriter::quic(stream)),
                 last_used: Instant::now(),
             },
         );
@@ -317,57 +332,48 @@ impl QuicStreamManager {
     /// Returns an error if the flow stream is not found or the write operation fails.
     #[instrument(skip(self, packet), level = "debug")]
     pub async fn send_on_flow(&self, flow_id: FlowId, packet: Packet) -> Result<()> {
-        let mut flows = self.flow_streams.lock().await;
-
-        if let Some(info) = flows.get_mut(&flow_id) {
-            let mut buf = BytesMut::with_capacity(1024);
-            encode_packet_to_buffer(&packet, &mut buf)?;
-
-            info.stream
-                .write_all(&buf)
-                .await
-                .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
+        let registered = self.flow_streams.lock().get_mut(&flow_id).map(|info| {
             info.last_used = Instant::now();
-
-            debug!(flow_id = ?flow_id, "Sent packet on flow stream");
-            Ok(())
-        } else {
-            drop(flows);
-
-            let (mut send, new_flow_id) = self.open_data_stream_with_flow().await?;
-
-            let mut buf = BytesMut::with_capacity(1024);
-            encode_packet_to_buffer(&packet, &mut buf)?;
-
-            send.write_all(&buf)
+            Arc::clone(&info.stream)
+        });
+        let (stream, end) = if let Some(stream) = registered {
+            let end = stream
+                .reserve_room(packet_size(&packet))
                 .await
-                .map_err(|e| MqttError::ConnectionError(format!("QUIC write error: {e}")))?;
-
-            self.flow_streams.lock().await.insert(
+                .commit_then(&packet, || ())?;
+            (stream, end)
+        } else {
+            let (stream, new_flow_id) = self.unopened_stream();
+            let end = stream.commit(&packet)?;
+            self.flow_streams.lock().insert(
                 new_flow_id,
                 FlowStreamInfo {
-                    stream: send,
+                    stream: Arc::clone(&stream),
                     last_used: Instant::now(),
                 },
             );
-
             debug!(
                 requested_flow_id = ?flow_id,
                 actual_flow_id = ?new_flow_id,
                 "Flow not found, opened new stream"
             );
-            Ok(())
-        }
+            (stream, end)
+        };
+        Flush::new(&stream, end).wait().await?;
+        debug!(flow_id = ?flow_id, "Sent packet on flow stream");
+        Ok(())
     }
 
-    pub async fn has_flow_stream(&self, flow_id: FlowId) -> bool {
-        self.flow_streams.lock().await.contains_key(&flow_id)
+    pub fn has_flow_stream(&self, flow_id: FlowId) -> bool {
+        self.flow_streams.lock().contains_key(&flow_id)
     }
 
     pub async fn remove_flow_stream(&self, flow_id: FlowId) -> bool {
-        let mut flows = self.flow_streams.lock().await;
-        if let Some(mut info) = flows.remove(&flow_id) {
-            let _ = info.stream.finish();
+        let removed = self.flow_streams.lock().remove(&flow_id);
+        if let Some(info) = removed {
+            if let Err(e) = info.stream.finish_or_reset().await {
+                debug!("QUIC data stream not finished: {e}");
+            }
             debug!(flow_id = ?flow_id, "Removed flow stream");
             true
         } else {
@@ -425,29 +431,106 @@ impl QuicStreamManager {
             }
         }
 
-        self.flow_streams.lock().await.remove(&flow_id);
-
-        let mut topics = self.topic_streams.lock().await;
-        topics.retain(|_, info| info.flow_id != flow_id);
+        self.flow_streams.lock().remove(&flow_id);
+        self.topic_streams
+            .lock()
+            .retain(|_, info| info.flow_id != flow_id);
+        self.drained.notify_waiters();
 
         debug!(flow_id = ?flow_id, "discarded flow at peer and cleaned up local state");
 
         Ok(())
     }
 
-    pub async fn close_all_streams(&self) {
-        let mut streams = self.topic_streams.lock().await;
-        for (topic, info) in streams.drain() {
-            let _ = info.stream.lock().await.finish();
+    pub fn close_all_streams(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.drained.notify_waiters();
+        let topics: Vec<(String, Arc<StreamInfo>)> = self.topic_streams.lock().drain().collect();
+        for (topic, info) in topics {
+            info.stream.abandon();
             trace!(topic = %topic, flow_id = ?info.flow_id, "Closed topic stream");
         }
-        drop(streams);
 
-        let mut flows = self.flow_streams.lock().await;
-        for (flow_id, mut info) in flows.drain() {
-            let _ = info.stream.finish();
+        let flows: Vec<(FlowId, FlowStreamInfo)> = self.flow_streams.lock().drain().collect();
+        for (flow_id, info) in flows {
+            info.stream.abandon();
             trace!(flow_id = ?flow_id, "Closed flow stream");
         }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum DataStream {
+    Topic(String),
+    Dedicated,
+}
+
+pub(crate) struct Reservation {
+    info: Arc<StreamInfo>,
+    drained: Arc<Notify>,
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.info.reserved.fetch_sub(1, Ordering::AcqRel);
+        self.drained.notify_waiters();
+    }
+}
+
+pub(crate) enum PreparedStream {
+    Topic(Reservation, RoomReservation),
+    Dedicated(RoomReservation, FlowId),
+}
+
+impl PreparedStream {
+    pub(crate) fn commit_then(
+        self,
+        packet: &Packet,
+        committed: impl FnOnce(),
+    ) -> Result<CommittedPacket> {
+        match self {
+            Self::Topic(reservation, room) => {
+                let end = room.commit_then(packet, committed)?;
+                *reservation.info.last_used.lock() = Instant::now();
+                trace!(flow_id = ?reservation.info.flow_id, "Committed packet to topic-specific stream");
+                Ok(CommittedPacket {
+                    flush: Flush::new(&reservation.info.stream, end),
+                    finish: None,
+                })
+            }
+            Self::Dedicated(room, flow_id) => {
+                let writer = Arc::clone(room.writer());
+                let end = room.commit_then(packet, committed)?;
+                trace!(flow_id = ?flow_id, "Committed packet to dedicated QUIC stream");
+                Ok(CommittedPacket {
+                    flush: Flush::new(&writer, end),
+                    finish: Some(writer),
+                })
+            }
+        }
+    }
+}
+
+pub(crate) struct CommittedPacket {
+    flush: Flush,
+    finish: Option<SharedWriter>,
+}
+
+impl CommittedPacket {
+    pub(crate) async fn send(self) -> Result<()> {
+        self.flush.wait().await?;
+        if let Some(writer) = self.finish {
+            writer.finish().await?;
+            tokio::task::yield_now().await;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn packet_size(packet: &Packet) -> usize {
+    match packet {
+        Packet::Publish(publish) => publish.body_encoded_size() + 5,
+        _ => 0,
     }
 }
 

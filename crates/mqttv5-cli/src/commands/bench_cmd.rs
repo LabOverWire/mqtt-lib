@@ -7,7 +7,7 @@ use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use mqtt5::time::Duration;
-use mqtt5::{ConnectOptions, MqttClient, QoS};
+use mqtt5::{ConnectOptions, MqttClient, PublishOptions, PublishOutcome, QoS};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::io::{Read as _, Write as _};
@@ -620,7 +620,10 @@ async fn configure_transport(client: &MqttClient, cmd: &BenchCommand, url: &str)
         } else {
             None
         };
-        client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+        client
+            .set_tls_config(cert_pem, key_pem, ca_pem)
+            .await
+            .context("Failed to load TLS certificates")?;
     }
     Ok(())
 }
@@ -1278,6 +1281,16 @@ async fn run_connections(cmd: BenchCommand) -> Result<()> {
     let measure_duration = Duration::from_secs(cmd.duration);
 
     let tls = load_tls_certs(&cmd)?;
+    if uses_tls(&resolved_url) && (tls.cert.is_some() || tls.key.is_some() || tls.ca.is_some()) {
+        MqttClient::new("tls-check")
+            .set_tls_config(
+                tls.cert.as_deref().cloned(),
+                tls.key.as_deref().cloned(),
+                tls.ca.as_deref().cloned(),
+            )
+            .await
+            .context("Failed to load TLS certificates")?;
+    }
     let state = ConnectionBenchState {
         broker_url: resolved_url,
         base_client_id: base_id,
@@ -1425,14 +1438,18 @@ fn spawn_connection_workers(
                 if insecure {
                     client.set_insecure_tls(true).await;
                 }
-                if configure_tls {
-                    client
+                if configure_tls
+                    && client
                         .set_tls_config(
                             cert_pem.as_deref().cloned(),
                             key_pem.as_deref().cloned(),
                             ca_pem.as_deref().cloned(),
                         )
-                        .await;
+                        .await
+                        .is_err()
+                {
+                    failed.fetch_add(1, Ordering::Relaxed);
+                    break;
                 }
                 if let Some(strategy) = quic_stream_strategy {
                     client.set_quic_stream_strategy(strategy).await;
@@ -2156,11 +2173,17 @@ fn spawn_hol_publishers(
                     }
                     continue;
                 };
-                let client = client.clone();
+                let options = PublishOptions {
+                    qos,
+                    ..Default::default()
+                };
+                let Ok(handle) = client.begin_publish(topic.as_ref(), payload, options).await
+                else {
+                    continue;
+                };
                 let published = Arc::clone(&published);
-                let topic = Arc::clone(&topic);
                 tokio::spawn(async move {
-                    if publish_message(&client, &topic, payload, qos).await.is_ok() {
+                    if matches!(handle.outcome().await, PublishOutcome::Delivered(_)) {
                         published.fetch_add(1, Ordering::Relaxed);
                     }
                     drop(permit);

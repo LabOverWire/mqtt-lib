@@ -814,7 +814,12 @@ impl BridgeConnection {
             .transpose()?;
 
         if cert_pem.is_some() || key_pem.is_some() || ca_pem.is_some() {
-            self.client.set_tls_config(cert_pem, key_pem, ca_pem).await;
+            self.client
+                .set_tls_config(cert_pem, key_pem, ca_pem)
+                .await
+                .map_err(|e| {
+                    BridgeError::ConfigurationError(format!("Failed to load TLS certificates: {e}"))
+                })?;
         }
 
         Ok(())
@@ -989,7 +994,10 @@ impl BridgeConnection {
             self.client.set_quic_max_streams(Some(max)).await;
         }
 
-        self.configure_quic_tls().await?;
+        if let Err(e) = self.configure_quic_tls().await {
+            self.update_error_stats(e.to_string()).await;
+            return Err(e);
+        }
 
         match Box::pin(
             self.client
@@ -1523,6 +1531,7 @@ impl BridgeConnection {
             MqttError::Io(_)
                 | MqttError::Timeout
                 | MqttError::NotConnected
+                | MqttError::OutcomeUnknown
                 | MqttError::ConnectionError(_)
                 | MqttError::ConnectionClosedByPeer
         ) || !self.client.is_connected().await

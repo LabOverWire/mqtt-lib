@@ -27,6 +27,9 @@ use super::state::WebSocketSettings;
 use super::state::{ClientTransportType, Reconnection};
 use super::MqttClient;
 
+#[cfg(feature = "transport-quic")]
+const TLS_REFUSAL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The settings a QUIC connection's configuration was built from: the
 /// configuration kept for early data is used again only with the same ones,
 /// so that a quics:// connection is never made with one built for quic://,
@@ -758,7 +761,25 @@ impl MqttClient {
                 .map(|&addr| self.open_at(addr, transport_type.clone(), host, given_tls))
                 .collect();
             let mut first_opened = None;
-            while let Some((addr, opened)) = opening.next().await {
+            #[cfg(feature = "transport-quic")]
+            let mut refusal_grace_end = None;
+            #[cfg(not(feature = "transport-quic"))]
+            let refusal_grace_end: Option<tokio::time::Instant> = None;
+            loop {
+                let next = match refusal_grace_end {
+                    Some(end) => {
+                        if let Ok(next) = tokio::time::timeout_at(end, opening.next()).await {
+                            next
+                        } else {
+                            remaining.clear();
+                            break;
+                        }
+                    }
+                    None => opening.next().await,
+                };
+                let Some((addr, opened)) = next else {
+                    break;
+                };
                 remaining.retain(|&waiting| waiting != addr);
                 match opened {
                     Ok(connected) => {
@@ -767,6 +788,12 @@ impl MqttClient {
                     }
                     Err(e) => {
                         tracing::debug!("Failed to connect to {}: {}", addr, e);
+                        #[cfg(feature = "transport-quic")]
+                        if crate::transport::quic::is_tls_refusal(&e) {
+                            refusal_grace_end.get_or_insert_with(|| {
+                                tokio::time::Instant::now() + TLS_REFUSAL_GRACE
+                            });
+                        }
                         last_error = Some(Self::worse_connect_error(last_error, e));
                     }
                 }
@@ -1325,7 +1352,7 @@ mod tests {
             "/../../test_certs/ca.pem"
         ))
         .unwrap();
-        client.set_tls_config(None, None, Some(ca)).await;
+        client.set_tls_config(None, None, Some(ca)).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         drop(silent);
         assert!(client.tls_config.read().await.config.is_some());

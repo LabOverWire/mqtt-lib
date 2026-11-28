@@ -51,7 +51,7 @@ async fn quics_connect(
         let _ = broker.run().await;
     });
     let client = MqttClient::new("quic-server-name");
-    client.set_tls_config(None, None, Some(cert)).await;
+    client.set_tls_config(None, None, Some(cert)).await.unwrap();
     if let Some((host, server_name)) = pinned {
         client.set_quic_server_name(host, server_name).await;
     }
