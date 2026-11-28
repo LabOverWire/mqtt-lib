@@ -9,16 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
-- **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
 - **`broker::router::Subscription` gains a private field**, which records the point a new subscriber's retained messages were taken from (see #343 under Fixed). A struct literal of `Subscription` outside the crate no longer compiles; build one through the router's subscribe methods.
+
+### Fixed
+
+- **A subscriber that subscribes right after a retained PUBLISH gets it once** (#343). The broker stored the retained message before it matched the publish against the subscriptions, and with file persistence it wrote the message to disk in between, so a SUBSCRIBE that arrived in that time got the message as a retained message and again as a live delivery. A subscription that asks for retained messages now takes them only from what was retained before it was added, and the broker no longer routes those live to it; a retained message stored after it is routed live only. This holds in the native and wasm brokers, with and without persistence. `MessageRouter` gains `subscribe_for_retained` and `retained_messages_before` for this.
+- **The periodic storage cleanup no longer loses an inflight record written while it runs** (#362). It removed a client's inflight directory when it found it empty, and the storage writer could create its temp file in that directory just after the removal, so the write failed and a QoS 1 or 2 flow whose record was lost was not resumed after a restart. The cleanup now asks the storage writer to remove an empty directory, and the writer does it between its own writes.
+
+## [mqtt5 0.52.0] - 2026-11-27
+
+### Breaking
+
+- **`MqttClient::set_tls_config` returns `Result<()>`** (see Fixed). It returns an error when the certificate, key or CA does not load, or when only one of the certificate and key is given; handle it, or a build with `-D warnings` fails on the unused `Result`.
+
+### Fixed
+
+- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
+
+## [mqttv5-cli 0.29.14] - 2026-11-27
+
+### Fixed
+
+- **`mqttv5 pub`, `sub` and `bench` fail when `--ca-cert`, `--cert` or `--key` does not load, and `bench --mode connections` fails before it starts its workers** (see mqtt5 0.52.0).
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
+
+## [mqtt5-wasm 2.1.12] - 2026-11-27
 
 ### Fixed
 
 - **The wasm broker answers an AUTH with another authentication method after CONNACK with DISCONNECT Protocol Error** (#358). It sent DISCONNECT with Bad Authentication Method, which is not a DISCONNECT reason code (MQTT-3.14.2-1). During the authentication that a CONNECT starts, such an AUTH still gets a CONNACK with Bad Authentication Method. On an MQTT 3.1.1 connection, which has no DISCONNECT from the server, an AUTH now closes the connection with nothing sent.
 - **A wasm broker re-authentication can be started again before it completes** (#358). An AUTH with Re-authenticate sent during an unfinished re-authentication got DISCONNECT with Protocol Error. It now starts a new exchange, since a client may start a re-authentication at any time after CONNACK (MQTT-4.12.1-1), as on the native broker.
-- **`MqttClient::set_tls_config` reports a certificate, key or CA that does not load, or a certificate or key given without the other** (#288). It logged the error and returned, so the caller could not tell, and the client kept the configuration it had before. An error now leaves the stored configuration in place and is returned. A certificate given with a CA but no key, which was accepted with the certificate ignored, is now an error too. The CLI (`pub`, `sub` and `bench`) fails with that error, and a QUIC bridge whose `ca_file`, `client_cert_file` or `client_key_file` does not load records it in `BridgeStats::last_error`.
-- **A subscriber that subscribes right after a retained PUBLISH gets it once** (#343). The broker stored the retained message before it matched the publish against the subscriptions, and with file persistence it wrote the message to disk in between, so a SUBSCRIBE that arrived in that time got the message as a retained message and again as a live delivery. A subscription that asks for retained messages now takes them only from what was retained before it was added, and the broker no longer routes those live to it; a retained message stored after it is routed live only. This holds in the native and wasm brokers, with and without persistence. `MessageRouter` gains `subscribe_for_retained` and `retained_messages_before` for this.
-- **The periodic storage cleanup no longer loses an inflight record written while it runs** (#362). It removed a client's inflight directory when it found it empty, and the storage writer could create its temp file in that directory just after the removal, so the write failed and a QoS 1 or 2 flow whose record was lost was not resumed after a restart. The cleanup now asks the storage writer to remove an empty directory, and the writer does it between its own writes.
+
+### Changed
+
+- Requires mqtt5 0.52. See mqtt5 0.52.0.
 
 ## [mqtt5 0.51.1] - 2026-11-26
 
