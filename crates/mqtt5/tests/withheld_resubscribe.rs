@@ -105,7 +105,8 @@ impl Broker {
             .await
             .unwrap()
             .unwrap()
-            .subscriptions[topic_filter]
+            .subscription(topic_filter, None)
+            .unwrap()
             .instance
     }
 }
