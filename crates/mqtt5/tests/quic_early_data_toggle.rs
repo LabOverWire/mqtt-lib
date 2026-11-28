@@ -32,7 +32,10 @@ async fn start_quic_broker() -> (tokio::task::JoinHandle<()>, SocketAddr) {
 async fn zero_rtt_after(first_connect_early_data: bool, scheme: &str) -> bool {
     let (broker, addr) = start_quic_broker().await;
     let client = MqttClient::new(format!("toggle-{first_connect_early_data}-{scheme}"));
-    client.set_tls_config(None, None, Some(test_ca())).await;
+    client
+        .set_tls_config(None, None, Some(test_ca()))
+        .await
+        .unwrap();
     client.set_quic_early_data(first_connect_early_data).await;
     client.connect(&format!("{scheme}://{addr}")).await.unwrap();
     client.disconnect().await.unwrap();
